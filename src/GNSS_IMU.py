@@ -342,7 +342,7 @@ for p in range(npasses):
                         epoch_GNSS_fix = epoch
                         
                     # set flag for velocity matching in middle of coast if no fix
-                    if fix[in_gnss_ptr]  != 1 and outp[epoch-1,10,p] == 1 and cfg.vel_match:
+                    if cfg.vel_match and fix[in_gnss_ptr]  == 1 and outp[epoch-1,10,p] == 1:
                         vel_match_flag = True
                     
                     # Run GNSS Measurement Update for Kalman Filter
@@ -357,7 +357,7 @@ for p in range(npasses):
                             print('   %.2f sec: Yaw align: ' % (time - t_gnss[0]), end='')
                             _, _, _, _, est_C_b_n = pvc_ECEF_to_LLH(est_r_eb_e, est_v_eb_e, est_C_b_e)
                             est_C_b_e, P  = Align_Yaw(est_C_b_e, est_C_b_n, GNSS_v_eb_n, P, run_dir)
-                            yaw_aligned = True
+                            yaw_aligned = True  # just do once to initialize yaw
                                                     
             # Generate KF uncertainty and IMU bias output records
             out_IMU_bias_est[GNSS_epoch, 0, p] = time
@@ -434,6 +434,7 @@ for p in range(npasses):
         # Do velocity matching if required
         if cfg.vel_match:
             if vel_match_flag or (outp[epoch,10,p] == 0 and outp[epoch-1,10,p] == 1):
+                print('Vel match: %.2f-%.2f secs' % (prev_time_GNSS_fix - t_imu[0], time - t_imu[0]))
                 outp[:,:,p] = Velocity_Match(outp[:,:,p], prev_epoch_GNSS_fix, epoch)
                 vel_match_flag = False
                

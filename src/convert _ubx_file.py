@@ -47,8 +47,8 @@ with open(infile + '.tag', "rb") as f:
     time_time = struct.unpack("<I", f.read(4))[0]
     time_sec = struct.unpack("<d", f.read(8))[0]
     start_time = time_time + time_sec
-    utc_time = datetime.utcfromtimestamp(start_time)
-    print(f"Start UTC time: {utc_time.isoformat(timespec='microseconds')}")
+    gpst_time = datetime.utcfromtimestamp(start_time)
+    print(f"Start GPST time: {gpst_time.isoformat(timespec='microseconds')}")
 
     # Parse end time
     first_block = f.read(8)
@@ -75,7 +75,7 @@ with open(infile, 'rb') as f:
                 msg.hour, msg.min, msg.second,
                 tzinfo=timezone.utc
             ) + timedelta(microseconds=msg.nano / 1000.0)
-            sec = utc_dt.timestamp() + LEAP_SECONDS
+            sec = utc_dt.timestamp() + LEAP_SECONDS   # UTC -> GPST
             
             llh = [msg.lat, msg.lon,  msg.hMSL / 1000]
             vel = np.array([msg.velN, msg.velE, msg.velD]) / 1000
@@ -93,16 +93,16 @@ with open(infile, 'rb') as f:
                 0, 0, 0, 0, 0,   # covariance matrix, age , ratio
                 vel[0], vel[1], -vel[2], # NED -> NEU for RTKLIB format
                 sAcc, sAcc, sAcc,
-                0, 0, 0,
-                hdg, hdgAcc])
+                0, 0, 0])
             secs.append(sec)
 
 # Save output file
 outg = np.array(rows, dtype=object)
-hdrg = '%  UTC            latitude(deg) longitude(deg) height(m) Q         ns        sdn(m)    sde(m)    sdu(m)    sdne(m)   sdeu(m)   sdun(m)  age(s)     ratio     vn(m/s)   ve(m/s)    vu(m/s)    sdvn      sdve     sdvu       sdvne    sdveu      sdvun'
-fmtg = ['%s'] + ['%.7f'] * 24
+hdrg = '%  GPST            latitude(deg) longitude(deg) height(m) Q         ns        sdn(m)    sde(m)    sdu(m)    sdne(m)   sdeu(m)   sdun(m)  age(s)     ratio     vn(m/s)   ve(m/s)    vu(m/s)    sdvn      sdve     sdvu       sdvne    sdveu      sdvun'
+fmtg = ['%s'] + ['%.7f'] * 22
 outfile = infile[:-4] + '_sf.pos'
-np.savetxt(outfile, outg[int(fs*out_skip):], header=hdrg, encoding='utf-8', fmt=fmtg, delimiter=' ')
+np.savetxt(outfile, outg[int(fs*out_skip):], header=hdrg, encoding='utf-8', fmt=fmtg,
+           delimiter=' ', comments='')
 
 # Plot data
 plt.figure()

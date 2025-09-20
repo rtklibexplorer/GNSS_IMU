@@ -87,8 +87,8 @@ nhc_vel_SD_coast = 0.05 # standard dev m/sec
 
 # Testing/Debug
 disable_imu = False  # enable to Run GNSS only
-start_coast = 30   # start of simulated GNSS outages (secs)
-end_coast = 30 # end of simulated GNSS outages (secs before end)
+start_coast = 25   # start of simulated GNSS outages (secs)
+end_coast = 45 # end of simulated GNSS outages (secs before end)
 coast_len = 15 # length of simulated  GNSS outages (secs)
 num_epochs = 0  # num epochs to run (0=all)
 gyro_bias_err = [0, 0, 0]  # Add constant error to gyro biases (deg/sec)

@@ -44,7 +44,7 @@ def Read_GNSS_data(filename):
     #   no_epochs    Number of epochs of data in the file
     #   ok           Indicates file has the expected number of columns
 
-    data = np.genfromtxt(filename, delimiter=' ', dtype=str)
+    data = np.genfromtxt(filename, dtype=str, comments='%')
     no_epochs, _ = data.shape
     ok = True
     timestamps = data[:,0] + ' ' + data[:,1]
@@ -82,7 +82,7 @@ def Read_IMU_data(filename):
     return in_imu, no_epochs, ok
 
 def Write_GNSS_data(filename, out_profile, out_KF_SD):
-    hdrg = '%  UTC            latitude(deg) longitude(deg) height(m) Q         ns        sdn(m)    sde(m)    sdu(m)    sdne(m)   sdeu(m)   sdun(m)  age(s)     ratio     vn(m/s)   ve(m/s)    vu(m/s)    sdvn      sdve     sdvu       sdvne    sdveu      sdvun'
+    hdrg = '%  GPST            latitude(deg) longitude(deg) height(m) Q         ns        sdn(m)    sde(m)    sdu(m)    sdne(m)   sdeu(m)   sdun(m)  age(s)     ratio     vn(m/s)   ve(m/s)    vu(m/s)    sdvn      sdve     sdvu       sdvne    sdveu      sdvun'
     fmtg = ['%s'] + ['%.7f'] * 25
     
     t_gnss = out_profile[:,0]
@@ -106,4 +106,4 @@ def Write_GNSS_data(filename, out_profile, out_KF_SD):
     outg[:,6:14] = 0  # pos covariance
     outg[:,17:23] = 0 # vel covariance
     outg[:,23:26] = out_profile[:,7:10]  # orientation
-    np.savetxt(filename, outg, header=hdrg, encoding='utf-8', fmt=fmtg, delimiter=' ')
+    np.savetxt(filename, outg, header=hdrg, encoding='utf-8', fmt=fmtg, delimiter=' ', comments='')

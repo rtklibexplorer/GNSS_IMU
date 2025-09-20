@@ -10,7 +10,8 @@
 
  Description:
      Script to convert an IMU data file and associated time tag file collected 
-     with RTKLIB into an input file for the sensor fusion solution.
+     with RTKLIB into an input file for the sensor fusion solution.  Time stamps
+     are in GPST time
 
 ===============================================================================
 """
@@ -42,9 +43,9 @@ with open(filepath + '.tag', "rb") as f:
     tick_f = struct.unpack("<I", f.read(4))[0]
     time_time = struct.unpack("<I", f.read(4))[0]
     time_sec = struct.unpack("<d", f.read(8))[0]
-    start_time = time_time + time_sec
-    utc_time = datetime.utcfromtimestamp(start_time)
-    print(f"Start UTC time: {utc_time.isoformat(timespec='microseconds')}")
+    start_time = time_time + time_sec  # GPST time
+    gpst_time = datetime.utcfromtimestamp(start_time)
+    print(f"Start GPST time: {gpst_time.isoformat(timespec='microseconds')}")
 
     # Parse end time from data
     while True:
