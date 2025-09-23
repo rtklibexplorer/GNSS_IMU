@@ -299,11 +299,14 @@ for p in range(npasses):
             meas_omega_ib_b *= (1 + est_IMU_bias[9:12])
 
         # Update estimated navigation solution unless in IMU coast mode
-        if not cfg.disable_imu and time * run_dir >= t_gnss[0] * run_dir:  # disable IMU for eval only
-            est_r_eb_e, est_v_eb_e, est_C_b_e = Nav_equations_ECEF(
-                tor_i, est_r_eb_e, est_v_eb_e, est_C_b_e,
-                    meas_f_ib_b, meas_omega_ib_b, gravity)
-            
+        if time * run_dir >= t_gnss[0] * run_dir: # don't run IMU before first GNSS sample
+            if not cfg.disable_imu:  # disable IMU for eval only
+                est_r_eb_e, est_v_eb_e, est_C_b_e = Nav_equations_ECEF(
+                    tor_i, est_r_eb_e, est_v_eb_e, est_C_b_e,
+                        meas_f_ib_b, meas_omega_ib_b, gravity)
+            else:
+                est_r_eb_e += est_v_eb_e * tor_i  # assume constant velocity if no IMU
+
         # Kalman state prediction if run for both IMU and GNSS measurements
         P = LC_KF_Predict(tor_i, est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias,
                        P, meas_f_ib_b, meas_omega_ib_b, LC_KF_config,
@@ -405,7 +408,7 @@ for p in range(npasses):
         # Check if est_C_b_e is ortho-normal and if not, ortho-normalize it
         est_C_b_e = ortho_C(est_C_b_e)
         
-        # Calculate position, velocity at GNSS antenna for output profile
+        # Calculate position, velocity at GNSS antenna and system origin for output profile
         est_v_gnss_e, est_r_gnss_e = Lever_Arm(est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b, lever_arm_b)
         est_v_ref_e, _ = Lever_Arm(est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b, -np.array(cfg.imu_offset))
         
