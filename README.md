@@ -1,8 +1,7 @@
 # GNSS_IMU
-Python implementation of a loosely coupled GNSS/IMU sensor fusion based on matlab code and textbook by Paul Groves, "Principles of GNSS, Inertial, 
-and Multisensor Integrated Navigation Systems" for demonstration and testing purposes.  
+Python implementation of a loosely coupled GNSS/IMU sensor fusion based on matlab code and textbook by Paul Groves, "Principles of GNSS, Inertial, and Multisensor Integrated Navigation Systems" for demonstration and testing purposes.  
 
-Includes two sample GNSS/IMU data sets, one collected from a vehicle, and the other collected while walking, as well as support files to run solutions on sample data from https://github.com/i2Nav-WHU/KF-GINS-Matlab.
+Includes two sample GNSS/IMU data sets, one collected from a vehicle, and another collected while walking, both with RTK solutions from a u-blox X20 GNSS receiver and a TDK ICM45686 IMU.  Also included are support files to get data and run solutions on a sample dataset from https://github.com/i2Nav-WHU/KF-GINS-Matlab.
 
 To process the default sample data set (from a vehicle), run the GNSS_IMU.py script.  To run with non-default configuration parameters, edit the drive_config.py file before running.  The default configuration parameters include several 15 second simulated GNSS outages to demonstrate performance under dead-reckoning conditions.  The first half of the data was taken on residential streets on a hill, and the second half was taken in a flat parking lot with tight maneuvers.
 
