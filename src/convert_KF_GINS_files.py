@@ -16,8 +16,7 @@ into an RTKLIB GNSS solution file and an IMU CSV file for input into the sensor
 Instructions for use:
 
 To generate the solution:
-1)Get the data files from github and copy them from the dataset2 folder into a 
-  data/KF_GINS folder
+1) Run get_KF_GINS_data.py to get the data from the repo
 2) Run this script 
 3) Comment/uncomment lines in the GNSS_IMU.py header to select these files 
 4) Run GNSS_IMU.py

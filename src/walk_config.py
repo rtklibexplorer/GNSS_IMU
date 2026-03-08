@@ -10,8 +10,8 @@
 
  Description:
      Configuration file for sample data in the walk_0827 folder.  This data is 
-     from a handheld GNSS reciever and IMU taken while walking in tight turns in
-     a backyard setting.
+     from an RTK solution from a u-blox X20 GNSS reciever and a TDK ICM-45686 
+     IMU taken while walking in tight turns in a backyard setting.
 
 ===============================================================================
 """

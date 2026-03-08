@@ -10,9 +10,9 @@
 
  Description:
      Configuration file for sample data in the drive_0708 folder.  This data is 
-     from a roof-mounted GNSS reciever and IMU on a car.  The first half of the 
-     data set is on residential streets on a hill, and the second half is tighter
-     turns in a flat parking lot.
+     from a RTK solution from a roof-mounted u-blox X20 GNSS reciever and a TDK 
+     ICM-45686 IMU on a car. The first half of the data set is on residential 
+     streets on a hill, and the second half is tighter turns in a flat parking lot.
 
 ===============================================================================
 """
