@@ -43,8 +43,6 @@ gnss_noise_factors = [1, 1]  # position, velocity
 # Initial uncertainties
 init =Init()
 init.att_unc = [2, 2, 10]   # initial attitude uncertainty per axis in (deg)
-init.vel_unc = [0.05, 0.05, 0.1]  # initial velocity uncertainty per axis (m/s)
-init.pos_unc = [0.05, 0.05, 0.1]  # initial position uncertainty per axis (m)
 init.bias_acc_unc = 0.1 # initial accel bias uncertainty (m/sec^2)
 init.bias_gyro_unc = 0.1 # initial gyro bias uncertainty (deg/sec)
 init.scale_acc_unc = 0.001
@@ -93,6 +91,7 @@ disable_imu = False  # enable to Run GNSS only
 start_coast = 40   # start of simulated GNSS outages (secs)
 end_coast = 30 # end of simulated GNSS outages (secs before end)
 coast_len = 15 # length of simulated  GNSS outages (secs)
+start_epoch = 0 # start run at this epoch
 num_epochs = 0  # num epochs to run (0=all)
 gyro_bias_err = [0, 0, 0]  # Add constant error to gyro biases (deg/sec)
 accel_bias_err = [0, 0, 0]  # Add constant error to acc biases (m/sec^2)

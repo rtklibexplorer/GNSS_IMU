@@ -19,7 +19,7 @@ import struct
 from datetime import datetime
 import numpy as np
 import pylab as plt
-from imu_math import Zero_Phase_LP
+from imu_math import LP_Filt
 
 ####### Select input file and configuration parameters  #######################################
 
@@ -64,9 +64,9 @@ gyro = data[:,3:6]  # gyro measurements in rad/sec
 sec = data[:,6] / 1000  # seconds since IMU power-up
 
 # Low pass filter data
-gyro_filt = Zero_Phase_LP(gyro, gyro_cutoff, fs=fs, order=4)
-acc_filt = Zero_Phase_LP(acc, acch_cutoff, fs=fs, order=4)
-acc_filt[:,2] = Zero_Phase_LP(acc[:,2], accv_cutoff, fs=fs, order=4)
+gyro_filt = LP_Filt(gyro, gyro_cutoff, fs=fs, order=4)
+acc_filt = LP_Filt(acc, acch_cutoff, fs=fs, order=4)
+acc_filt[:,2] = LP_Filt(acc[:,2], accv_cutoff, fs=fs, order=4)
 
 # Tweak sum of time stamps to match total time
 sec -= sec[0]  # time relative to start of log 

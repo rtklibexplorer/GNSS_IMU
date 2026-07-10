@@ -14,9 +14,16 @@
 """
 
 import numpy as np
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, lfilter
 from numpy.linalg import norm, inv
 from imu_transforms import Euler_to_CTM
+
+# Physical constants
+omega_ie = 7.292115E-5 # Earth rotation rate (rad/s)
+R_0 = 6378137           # WGS84 Equatorial radius in meters
+e_ecc = 0.0818191908425 # earth eccentricity
+mu = 3.986004418E14     # WGS84 Earth gravitational constant (m^3 s^-2)
+J_2 = 1.082627E-3       # WGS84 Earth second gravitational constant
 
 # Kalman Filter Configuration
 class LC_KF_Config:
@@ -36,11 +43,6 @@ def Gravity_ECEF(r_eb_e):
     # Outputs:
     #   g       Acceleration due to gravity (m/s^2)
     
-    # Parameters
-    R_0 = 6378137           # WGS84 Equatorial radius in meters
-    mu = 3.986004418E14     # WGS84 Earth gravitational constant (m^3 s^-2)
-    J_2 = 1.082627E-3       # WGS84 Earth second gravitational constant
-    omega_ie = 7.292115E-5  # Earth rotation rate (rad/s)
 
     # Calculate distance from center of the Earth
     mag_r = norm(r_eb_e)
@@ -60,18 +62,18 @@ def Gravity_ECEF(r_eb_e):
     g[0:2] += omega_ie**2 * r_eb_e[0:2]
     return g
 
-def Init_P_matrix(LC_KF_config, C_e_n):
+def Init_P_matrix(LC_KF_config, C_e_n, pos_unc, vel_unc):
     #Initialize_P_matrix - Initializes the loosely coupled INS/GNSS KF
     #error covariance matrix
     #
     # Inputs:
     #   TC_KF_config
     #     .init.att_unc           Initial attitude uncertainty per axis (rad)
-    #     .init.vel_unc           Initial velocity uncertainty per axis (m/s)
-    #     .init.pos_unc           Initial position uncertainty per axis (m)
     #     .init.bias_acc_unc      Initial accel. bias uncertainty (m/s^2)
     #     .init.bias_gyro_unc     Initial gyro. bias uncertainty (rad/s)
     #      C_e_n                     ECEF to NED CTM
+    #   vel_unc                   Initial velocity uncertainty per axis (m/s)
+    #   pos_unc                   Initial position uncertainty per axis (m)
     #
     # Outputs:
     #   P_matrix              state estimation error covariance matrix
@@ -81,8 +83,8 @@ def Init_P_matrix(LC_KF_config, C_e_n):
     P = np.zeros((ns, ns))
     
     P[0:3, 0:3] = C_e_n.T @ (np.eye(3) * np.array(LC_KF_config.init.att_unc)**2) @ C_e_n
-    P[3:6, 3:6] = C_e_n.T @ (np.eye(3) * np.array(LC_KF_config.init.vel_unc)**2) @ C_e_n
-    P[6:9, 6:9] = C_e_n.T @ (np.eye(3) * np.array(LC_KF_config.init.pos_unc)**2) @ C_e_n
+    P[3:6, 3:6] = C_e_n.T @ (np.eye(3) * np.array(vel_unc)**2) @ C_e_n
+    P[6:9, 6:9] = C_e_n.T @ (np.eye(3) * np.array(pos_unc)**2) @ C_e_n
     P[9:12, 9:12] = np.eye(3) * np.array(LC_KF_config.init.bias_acc_unc)**2
     P[12:15, 12:15] = np.eye(3) *np.array(LC_KF_config.init.bias_gyro_unc)**2
     if ns == 21:  # Scale factors
@@ -160,10 +162,8 @@ def Radii_of_curvature(L):
     #   R_N   meridian radius of curvature (m)
     #   R_E   transverse radius of curvature (m)
     
-    R_0 = 6378137
-    e = 0.0818191908425
-    temp = 1 - (e * np.sin(L))**2
-    R_N = R_0 * (1 - e**2) / temp**1.5
+    temp = 1 - (e_ecc * np.sin(L))**2
+    R_N = R_0 * (1 - e_ecc**2) / temp**1.5
     R_E = R_0 / np.sqrt(temp)
     return R_N, R_E
 
@@ -210,8 +210,6 @@ def Nav_equations_ECEF(tor_i, old_r_eb_e, old_v_eb_e, old_C_b_e, f_ib_b,
     #                 ECEF-frame axes (m/s)
     #   C_b_e         body-to-ECEF-frame coordinate transformation matrix
     
-    omega_ie = 7.292115E-5 # Earth rotation rate (rad/s)
-
     # ATTITUDE UPDATE
     # From (2.145) determine the Earth rotation over the update interval
     alpha_ie = omega_ie * tor_i
@@ -293,8 +291,6 @@ def LC_KF_Predict(tor_s, est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias, P, Qc,
     #     Rows 4-6          estimated gyro biases (rad/s)
     #   P_matrix_new      updated Kalman filter error covariance matrix
     
-    omega_ie = 7.292115E-5
-   
     abs_tor_s = abs(tor_s)
 
     # Skew symmetric matrix of Earth rate
@@ -405,8 +401,9 @@ def LC_KF_ZUPT_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, meas_f_ib_b,
     # Measurement innovation (ZUPT: velocity should be zero, ZARU: angular rate should be zero)
     delta_z = np.zeros((9, 1))
     delta_z[0:3, 0] = 0 - est_v_eb_e.flatten() * run_dir  # ZUPT: 0 - v_est
-    delta_z[3:6, 0] = meas_omega_ib_b.flatten() * run_dir # ZARU: 0 - (omega_measured - bias_est)
     delta_z[6:9, 0] = (meas_f_ib_b - f_pred_b).flatten() * run_dir
+    # ZARU: omega_meas - omega_earth_body
+    delta_z[3:6, 0] = (meas_omega_ib_b.flatten() - est_C_b_e.T @  [0, 0, omega_ie] ) * run_dir
 
     # State update
     x_est_new = x_est + K @ delta_z
@@ -532,15 +529,20 @@ def Combine_Passes(profiles):
     outp[:,14:17] = np.average(profiles[:,13:16,:], weights=1/(0.1+profiles[:,14:17,:]), axis=2)
     return(outp)
 
-def Zero_Phase_LP(data, cutoff, fs, order=4):
+def LP_Filt(data, cutoff, fs, order=4, causal=False):
     nyquist = 0.5 * fs
+    if cutoff==0:
+        return data
     if cutoff >= nyquist:
         print('Warning: Data not filtered, cutoff freq > nyquist')
         return data
     norm_cutoff = cutoff / nyquist
     b, a = butter(order, norm_cutoff, btype='low', analog=False)
-    filtered = filtfilt(b, a, data, axis=0)  # forward-backward filter
-    return filtered
+    if causal==True:
+        filtered = lfilter(b, a, data, axis=0)  # causal filter
+    else:
+        filtered = filtfilt(b, a, data, axis=0)  # forward-backward filter
+        return filtered
 
 def Compute_Instantaneous_Vel(positions, dt):
     """
@@ -575,6 +577,3 @@ def Reverse_Data_Dir(in_gnss, in_imu, outp):
     in_imu_rev = in_imu[::-1,:].copy()
     outp_rev = outp[::-1,:].copy()
     return in_gnss_rev, in_imu_rev, outp_rev
-
-
-    

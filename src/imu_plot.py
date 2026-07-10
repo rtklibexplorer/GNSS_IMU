@@ -20,9 +20,9 @@ from imu_transforms import ECEF_to_NED, LLH_to_ECEF
 def wrap(angle_deg):
     return (angle_deg + 180) % 360 - 180
 
-def Plot_Results(in_gnss, in_imu, out_profile, title, run_dir):
-    t_in = in_gnss[:,0] - in_gnss[0,0]
-    t_out = out_profile[:,0] - in_gnss[0,0]
+def Plot_Results(in_gnss, in_imu, out_profile, title, run_dir, t0):
+    t_in = in_gnss[:,0] - in_gnss[0,0] + t0
+    t_out = out_profile[:,0] - in_gnss[0,0] + t0
     coast_status = out_profile[:,10]
 
     ecef_pos_in = LLH_to_ECEF(in_gnss[:,1:4])

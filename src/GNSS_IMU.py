@@ -189,6 +189,17 @@ LC_KF_Config.r_lever_arm_b = np.array(cfg.gnss_offset) - np.array(cfg.imu_offset
 in_gnss, num_gnss, ok = Read_GNSS_data(join(dataDir, 'gnss_%s.pos' % fileIn ))
 in_imu, num_epochs, ok = Read_IMU_data(join(dataDir, 'imu_%s.csv' % fileIn ))
 
+# strip start of data if start_epoch != 0
+if cfg.start_epoch > 0:
+    plot_t0 = in_imu[cfg.start_epoch,0] - in_imu[0,0]
+    in_imu = in_imu[cfg.start_epoch:,:]
+    ix = np.where(in_gnss[:,0] > in_imu[0,0])[0]
+    in_gnss = in_gnss[ix[0]:,:]
+    num_gnss -= ix[0]
+    num_epochs -= cfg.start_epoch
+else:
+    plot_t0 = 0
+
 # Add simulated errors to input measurements for eval purposes
 in_imu[:,1:4] = (in_imu[:,1:4] + np.array(cfg.accel_bias_err) / g) * cfg.accel_scale_factor
 in_imu[:,4:7] = (in_imu[:,4:7] + np.deg2rad(cfg.gyro_bias_err)) * cfg.gyro_scale_factor
@@ -265,7 +276,7 @@ for p in range(npasses):
     
     # Initialize Kalman filter P matrix and IMU bias states
     C_e_n = compute_C_e_n(est_L_b, est_lambda_b,) # Map to ECEF
-    P = Init_P_matrix(LC_KF_config, C_e_n)
+    P = Init_P_matrix(LC_KF_config, C_e_n, in_gnss[0,6:9], in_gnss[0,17:20])
     est_IMU_bias = np.zeros(nbs)
     out_IMU_bias_est[0, 0, p] = prev_time
     out_IMU_bias_est[0, 1:nbs+1, p] = est_IMU_bias
@@ -285,7 +296,7 @@ for p in range(npasses):
     yaw_aligned = not cfg.yaw_align  # Init yaw as unaligned if yaw align option is enabled
 
     # Loop through IMU epocs
-    for epoch in range(num_epochs):
+    for epoch in range(1, num_epochs):
         
         print('   Secs: %.3f' % (t_imu[epoch] - t_imu[0]), end='\r')
         
@@ -293,6 +304,7 @@ for p in range(npasses):
         time = t_imu[epoch]
         tor_i = time - prev_time
         if tor_i < 1e-5:
+            outp[epoch,:,p] = outp[epoch-1,:,p]
             continue
         coast = outp[epoch,10,p]  # get coast status for this epoch
         
@@ -478,17 +490,17 @@ for p in range(npasses):
     # Plot results
     ng, ni = epoch_GNSS, num_epochs  # number of GNSS and IMU samples
     if cfg.plot_results:
-        Plot_Results(in_gnss, in_imu[:ni], outp[:,:,p], fileIn, run_dir)
+        Plot_Results(in_gnss, in_imu[:ni], outp[:,:,p], fileIn, run_dir, plot_t0)
     if cfg.plot_bias_data:
-        Plot_Biases(out_IMU_bias_est[:ng,:,p], fileIn, in_gnss[0,0])
+        Plot_Biases(out_IMU_bias_est[:ng,:,p], fileIn, in_gnss[0,0] - plot_t0)
     if cfg.plot_unc_data:
-        Plot_Uncertainties(out_KF_SD[:ng,:,p], fileIn, in_gnss[0,0])
+        Plot_Uncertainties(out_KF_SD[:ng,:,p], fileIn, in_gnss[0,0] - plot_t0)
     
 # Combine forward and backward solutions and plot combined result
 if npasses == 2:
     outp = Combine_Passes(outp)
     if cfg.plot_results:
-        Plot_Results(in_gnss, in_imu[:ni], outp, fileIn, 1)
+        Plot_Results(in_gnss, in_imu[:ni], outp, fileIn, 1, plot_t0)
 else:
     outp = outp[:,:,0] 
     
@@ -497,7 +509,7 @@ outp = outp[0::cfg.out_step]
 
 # Plot raw IMU data
 if cfg.plot_imu_data:
-    Plot_IMU(in_imu[:ni], norm(gravity), fileIn, in_gnss[0,0])
+    Plot_IMU(in_imu[:ni], norm(gravity), fileIn, in_gnss[0,0] - plot_t0)
 
 # Save output in RTKLIB solution file format
 if npasses == 1 and run_dir == -1:
