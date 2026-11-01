@@ -39,6 +39,14 @@ python src/run_benchmark.py
 
 The runner has no command-line options; edit its parameter block to select experiments, outage timing, parallelism, and which IMUs to rerun. It automatically invokes download and conversion when their respective data directories are absent. For an incomplete existing directory, run the preparation scripts manually. The default benchmark uses 60-second outages separated by 90 seconds of GNSS, and also runs continuous comparisons with a 60.5-second scoring warmup. JSON results, logs, reports, and figures are saved under `benchmark_results`. External estimators are required only for the benchmark, not for running GNSS_IMU on its own.
 
+GNSS outage comparison:
+
+![Position errors at GNSS outage endpoints, with NHC disabled and enabled](images/awesome_gins_outage_benchmark.png)
+
+Continuous GNSS comparison:
+
+![Position and attitude RMS errors with continuous GNSS](images/awesome_gins_continuous_benchmark.png)
+
 To calculate NHC pitch/yaw misalignment, run `python src/calibrate_nhc_misalignment.py` using GNSS_IMU as the default navigation source, or add `--estimator INSLIB` to use INSLIB. Both modes run with continuous GNSS and NHC disabled, and output settings for both code sets plus the rotation matrix. Reports are saved separately under `benchmark_results/gnss_imu_nhc_calibration` or `benchmark_results/inslib_nhc_calibration`; production configurations are not modified.
 
 See the [user manual](docs/GNSS_IMU_User_Manual.docx) for sample-data instructions, calibration details, a detailed benchmark walkthrough, and explanations of every sensor configuration option.
