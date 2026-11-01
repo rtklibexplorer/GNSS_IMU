@@ -90,7 +90,7 @@ def compute_C_e_n(lat, lon):
     ])
 
 def pvc_ECEF_to_GNSS(r_eb_e, v_eb_e, C_b_e):
-    #ECEF_to_LLH - Converts Cartesian  to curvilinear position, velocity
+    #pvc_ECEF_to_GNSS - Converts Cartesian to curvilinear position, velocity
     #resolving axes from ECEF to NED and attitude from ECEF- to NED-referenced
     # Inputs:
     #   r_eb_e        Cartesian position of body frame w.r.t. ECEF frame, resolved
@@ -137,7 +137,7 @@ def pvc_ECEF_to_GNSS(r_eb_e, v_eb_e, C_b_e):
     return L_b, lambda_b, h_b, v_eb_n, C_b_n
 
 def pvc_GNSS_to_ECEF(L_b, lambda_b, h_b, v_eb_n, C_b_n):
-    #LLH_to_ECEF - Converts curvilinear to Cartesian position, velocity
+    #pvc_GNSS_to_ECEF - Converts curvilinear to Cartesian position, velocity
     #resolving axes from NED to ECEF and attitude from NED- to ECEF-referenced
     # Inputs:
     #   L_b           latitude (rad)
@@ -189,17 +189,24 @@ def pv_ECEF_to_GNSS(r_eb_e, v_eb_e):
     #resolving axes from ECEF to NED
     
     # Inputs:
-    #   r_eb_e        Cartesian position of body frame w.r.t. ECEF frame, resolved
-    #                 along ECEF-frame axes (m)
-    #   v_eb_e        velocity of body frame w.r.t. ECEF frame, resolved along
-    #                 ECEF-frame axes (m/s)
+    #   r_eb_e        Cartesian positions of body frame w.r.t. ECEF frame,
+    #                 resolved along ECEF-frame axes; shape (N, 3) (m)
+    #   v_eb_e        Velocities of body frame w.r.t. ECEF frame, resolved along
+    #                 ECEF-frame axes; matching shape (N, 3) (m/s)
     #
     # Outputs:
-    #   L_b           latitude (rad)
-    #   lambda_b      longitude (rad)
-    #   h_b           height (m)
-    #   v_eb_n        velocity of body frame w.r.t. ECEF frame, resolved along
-    #                 north, east, and down (m/s)
+    #   L_b           Latitudes; shape (N,) (rad)
+    #   lambda_b      Longitudes; shape (N,) (rad)
+    #   h_b           Heights; shape (N,) (m)
+    #   v_eb_n        Velocities of body frame w.r.t. ECEF frame, resolved along
+    #                 north, east, and down; shape (N, 3) (m/s)
+
+    r_eb_e = np.asarray(r_eb_e, dtype=float)
+    v_eb_e = np.asarray(v_eb_e, dtype=float)
+    if r_eb_e.ndim != 2 or r_eb_e.shape[1] != 3:
+        raise ValueError('r_eb_e must have shape (N, 3)')
+    if v_eb_e.shape != r_eb_e.shape:
+        raise ValueError('v_eb_e must have the same (N, 3) shape as r_eb_e')
 
     # Parameters
     R_0 = 6378137
@@ -207,10 +214,11 @@ def pv_ECEF_to_GNSS(r_eb_e, v_eb_e):
 
     # Convert position using Borkowski closed-form exact solution
     # From (2.113)
-    lambda_b = np.arctan2(r_eb_e[1], r_eb_e[0])
-    k1 = np.sqrt(1 - e**2) * np.abs(r_eb_e[2])
+    x, y, z = r_eb_e.T
+    lambda_b = np.arctan2(y, x)
+    k1 = np.sqrt(1 - e**2) * np.abs(z)
     k2 = e**2 * R_0
-    beta = np.sqrt(r_eb_e[0]**2 + r_eb_e[1]**2)
+    beta = np.sqrt(x**2 + y**2)
     E = (k1 - k2) / beta
     F = (k1 + k2) / beta
     P = 4/3 * (E*F + 1)
@@ -219,28 +227,37 @@ def pv_ECEF_to_GNSS(r_eb_e, v_eb_e):
     V = (np.sqrt(D) - Q)**(1/3) - (np.sqrt(D) + Q)**(1/3)
     G = 0.5 * (np.sqrt(E**2 + V) + E)
     T = np.sqrt(G**2 + (F - V * G) / (2 * G - E)) - G
-    L_b = np.sign(r_eb_e[2]) * np.arctan((1 - T**2) / (2 * T * np.sqrt(1 - e**2)))
+    L_b = np.sign(z) * np.arctan((1 - T**2) / (2 * T * np.sqrt(1 - e**2)))
     h_b = (beta - R_0 * T) * np.cos(L_b) + \
-          (r_eb_e[2] - np.sign(r_eb_e[2]) * R_0 * np.sqrt(1 - e**2)) * np.sin(L_b)
+          (z - np.sign(z) * R_0 * np.sqrt(1 - e**2)) * np.sin(L_b)
 
-    # Calculate ECEF to NED coordinate transformation matrix using (2.150)
-    C_e_n = compute_C_e_n(L_b, lambda_b)
-
-    # Transform velocity using (2.73)
-    v_eb_n = C_e_n @ v_eb_e
+    # Transform every velocity from ECEF to NED without constructing one
+    # coordinate-transformation matrix per epoch.
+    sin_lat, cos_lat = np.sin(L_b), np.cos(L_b)
+    sin_lon, cos_lon = np.sin(lambda_b), np.cos(lambda_b)
+    vx, vy, vz = v_eb_e.T
+    v_eb_n = np.column_stack((
+        -sin_lat * cos_lon * vx - sin_lat * sin_lon * vy + cos_lat * vz,
+        -sin_lon * vx + cos_lon * vy,
+        -cos_lat * cos_lon * vx - cos_lat * sin_lon * vy - sin_lat * vz))
     return L_b, lambda_b, h_b, v_eb_n
 
 def ECEF_to_NED(ecef_pos, ecef_vel, ecef_origin):
     """
     Convert an array of ECEF coordinates to NED using specified ecef origin.
     Parameters:
-        ecef_coords (np.ndarray): Nx3 array of [x, y, z] ECEF coordinates.
+        ecef_pos (np.ndarray): Nx3 array of [x, y, z] ECEF positions (m).
+        ecef_vel (np.ndarray): Nx3 array of ECEF velocities (m/s).
+        ecef_origin (np.ndarray): 3-element ECEF origin position (m).
     Returns:
-        ned_coords (np.ndarray): Nx3 array of [north, east, down] coordinates.
+        ned_pos (np.ndarray): Nx3 array of [north, east, down] positions (m).
+        ned_vel (np.ndarray): Nx3 array of NED velocities (m/s).
     """
     
     # Rotation matrix from ECEF to NED
-    lat0, lon0, _, _ = pv_ECEF_to_GNSS(ecef_origin, [0,0,0])
+    origin = np.asarray(ecef_origin, dtype=float).reshape(1, 3)
+    lat, lon, _, _ = pv_ECEF_to_GNSS(origin, np.zeros((1, 3)))
+    lat0, lon0 = lat[0], lon[0]
     R = compute_C_e_n(lat0, lon0)
     
     # Vector from origin to each point
@@ -253,15 +270,13 @@ def ECEF_to_NED(ecef_pos, ecef_vel, ecef_origin):
     return ned_pos, ned_vel
 
 def NED_to_ECEF(L_b, lambda_b, h_b, v_eb_n, C_b_n):
-    #NED_to_ECEF - Converts curvilinear to Cartesian position, velocity
-    #resolving axes from NED to ECEF and attitude from NED- to ECEF-referenced
+    #NED_to_ECEF - Converts curvilinear to Cartesian position only
     # Inputs:
     #   L_b           latitude (rad)
     #   lambda_b      longitude (rad)
     #   h_b           height (m)
-    #   v_eb_n        velocity of body frame w.r.t. ECEF frame, resolved along
-    #                 north, east, and down (m/s)
-    #   C_b_n         body-to-NED coordinate transformation matrix
+    #   v_eb_n        unused (retained for call compatibility)
+    #   C_b_n         unused (retained for call compatibility)
     #
     # Outputs:
     #   r_eb_e        Cartesian position of body frame w.r.t. ECEF frame, resolved
@@ -352,7 +367,7 @@ def ECEF_to_NED_vel(vel_ecef, lat_deg, lon_deg):
     Convert an array of ECEF velocity vectors to NED velocity vectors.
     
     Parameters:
-    vel_ecef_array : ndarray
+    vel_ecef : ndarray
         An (N, 3) array of ECEF velocity vectors.
     lat_deg : float
         Latitude in degrees.
@@ -386,8 +401,10 @@ def LLH_NED_to_ECEF(llh, ned_vel):
     Vectorized for large arrays.
     
     Parameters:
-        llh_array: Nx3 array of [lat, lon, height] in degrees and meters.
-        ned_vel_array: Nx3 array of [vn, ve, vd] in m/s.
+        llh: Nx3 array of [lat, lon, height]. LLH_to_ECEF uses radians;
+            NED_to_ECEF_vel uses degrees, so this wrapper currently has
+            inconsistent angular-unit requirements.
+        ned_vel: Nx3 array of [vn, ve, vd] in m/s.
     
     Returns:
         ecef_positions: Nx3 array of ECEF [x, y, z] in meters.

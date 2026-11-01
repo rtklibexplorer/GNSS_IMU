@@ -33,7 +33,7 @@ def Plot_Results(in_gnss, in_imu, out_profile, title, run_dir, t0):
     ecef_pos_out = out_profile[:,1:4]
     ecef_vel_out = out_profile[:,4:7]
     ned_pos_out, ned_vel_out = ECEF_to_NED(ecef_pos_out, ecef_vel_out, ecef_origin)
-    b_vel_out = out_profile[:,20:23]
+    frd_vel_out = out_profile[:,20:23]
     
     ned_pos_in_resamp = np.zeros_like(ned_pos_out)
     ned_vel_in_resamp = np.zeros_like(ned_vel_out)
@@ -52,7 +52,7 @@ def Plot_Results(in_gnss, in_imu, out_profile, title, run_dir, t0):
     vel_diff_h95 = np.percentile(abs(vel_diff), 95, axis=0)
     pos_diff_h95 = np.percentile(abs(pos_diff), 95, axis=0)
 
-    # plot relative position in NED
+    # Plot the configured output point and GNSS antenna positions in local NED.
     plt.figure()
     plt.title('%s: GNSS antenna position (NED)' % title)
     plt.plot(t_in, ned_pos_in[:,0], 'o-')
@@ -83,11 +83,11 @@ def Plot_Results(in_gnss, in_imu, out_profile, title, run_dir, t0):
     plt.ylabel('m/sec')
     plt.show()
     
-    # plot velocity in body frame
+    # Plot NHC-pivot velocity resolved in vehicle forward-right-down axes.
     plt.figure()
-    plt.title('%s: System origin velocity (body frame)' % title)
-    plt.plot(t_out, b_vel_out, '.-')
-    plt.legend(['X', 'Y','Z'])
+    plt.title('%s: NHC pivot velocity (vehicle FRD)' % title)
+    plt.plot(t_out, frd_vel_out, '.-')
+    plt.legend(['F', 'R', 'D'])
     plt.grid()
     plt.xlabel('secs')
     plt.ylabel('m/sec')
@@ -125,7 +125,7 @@ def Plot_Results(in_gnss, in_imu, out_profile, title, run_dir, t0):
     
     # calculate imu misalignment
     yaw_v = np.interp(t_out, t_in, yaw_v_in)
-    ix = np.where(b_vel_out[:,0] > 0.5)[0]
+    ix = np.where(abs(frd_vel_out[:,0]) > 0.5)[0]
     err_rp = np.median(rpy_out[ix,0:2],axis=0)
     err_y = np.median(wrap(rpy_out[ix,2] - yaw_v[ix]))
     print('   IMU misalignment: R=%.3f P=%.3f, Y=%.3f (degrees)' % (err_rp[0], err_rp[1], err_y))

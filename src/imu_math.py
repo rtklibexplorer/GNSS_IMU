@@ -20,10 +20,16 @@ from imu_transforms import Euler_to_CTM
 
 # Physical constants
 omega_ie = 7.292115E-5 # Earth rotation rate (rad/s)
+ug_to_mps_squared = 9.80665 * 1E-6  # default gravity, micro g -> meters/sec^2
 R_0 = 6378137           # WGS84 Equatorial radius in meters
 e_ecc = 0.0818191908425 # earth eccentricity
 mu = 3.986004418E14     # WGS84 Earth gravitational constant (m^3 s^-2)
 J_2 = 1.082627E-3       # WGS84 Earth second gravitational constant
+FIX, FLOAT, DGPS, SINGLE = 1,2,4,5   # GNSS solution states
+
+# Paul Groves error-state convention:
+# [delta_theta, v_hat - v, r_hat - r, b_a - b_a_hat, b_g - b_g_hat].
+# Navigation errors are subtracted; truth-minus-estimate bias errors are added.
 
 # Kalman Filter Configuration
 class LC_KF_Config:
@@ -58,25 +64,28 @@ def Gravity_ECEF(r_eb_e):
                   (1 - z_scale) * r_eb_e[1],
                   (3 - z_scale) * r_eb_e[2]]))
 
-    # Add centripetal acceleration using (2.133)
+    # Add centrifugal acceleration using (2.133)
     g[0:2] += omega_ie**2 * r_eb_e[0:2]
     return g
 
 def Init_P_matrix(LC_KF_config, C_e_n, pos_unc, vel_unc):
-    #Initialize_P_matrix - Initializes the loosely coupled INS/GNSS KF
+    #Init_P_matrix - Initializes the loosely coupled INS/GNSS KF
     #error covariance matrix
     #
     # Inputs:
-    #   TC_KF_config
+    #   LC_KF_config
     #     .init.att_unc           Initial attitude uncertainty per axis (rad)
     #     .init.bias_acc_unc      Initial accel. bias uncertainty (m/s^2)
     #     .init.bias_gyro_unc     Initial gyro. bias uncertainty (rad/s)
-    #      C_e_n                     ECEF to NED CTM
+    #     .init.scale_acc_unc     Initial accelerometer-scale uncertainty (fraction)
+    #     .init.scale_gyro_unc    Initial gyro-scale uncertainty (fraction)
+    #     .nstates               Number of error states (15 or 21)
+    #   C_e_n                     ECEF to NED CTM
     #   vel_unc                   Initial velocity uncertainty per axis (m/s)
     #   pos_unc                   Initial position uncertainty per axis (m)
     #
     # Outputs:
-    #   P_matrix              state estimation error covariance matrix
+    #   P                     state estimation error covariance matrix
     
     # Initialize error covariance matrix
     ns = LC_KF_config.nstates
@@ -94,16 +103,13 @@ def Init_P_matrix(LC_KF_config, C_e_n, pos_unc, vel_unc):
 
 def Init_Qc_matrix_PSD(cfg, ns):
     # Build continuous-time kalman process noise variances matrix (14.82)
-    g = 9.80665  # Default gravity (m/sec^2)
-    ug_to_mps_squared = g * 1E-6  # micro g -> meters/sec^2
-    root_Hz = np.sqrt(cfg.imu_sample_rate)
-    attitude_noise_var = (np.deg2rad(cfg.gyro_noise_PSD) * root_Hz * cfg.imu_noise_factors[0])**2
-    vel_noise_var = (cfg.accel_noise_PSD * ug_to_mps_squared * root_Hz * cfg.imu_noise_factors[1])**2
-    accel_bias_noise_var = (cfg.accel_bias_PSD * ug_to_mps_squared * root_Hz * cfg.imu_noise_factors[2])**2
-    gyro_bias_noise_var =  (np.deg2rad(cfg.gyro_bias_PSD) * root_Hz * cfg.imu_noise_factors[3])**2
+    attitude_noise_var = (np.deg2rad(cfg.gyro_noise_density) * cfg.imu_noise_factors[0])**2
+    vel_noise_var = (cfg.accel_noise_density * ug_to_mps_squared * cfg.imu_noise_factors[1])**2
+    accel_bias_noise_var = (cfg.accel_bias_density * ug_to_mps_squared * cfg.imu_noise_factors[2])**2
+    gyro_bias_noise_var =  (np.deg2rad(cfg.gyro_bias_density) * cfg.imu_noise_factors[3])**2
     if cfg.scale_factors:
-        accel_scale_noise_var = (cfg.accel_scale_noise_SD * ug_to_mps_squared * root_Hz * cfg.imu_noise_factors[4])**2
-        gyro_scale_noise_var = (np.deg2rad(cfg.gyro_scale_noise_SD) * root_Hz * cfg.imu_noise_factors[5])**2
+        accel_scale_noise_var = (cfg.accel_scale_noise_density * cfg.imu_noise_factors[4])**2
+        gyro_scale_noise_var = (cfg.gyro_scale_noise_density * cfg.imu_noise_factors[5])**2
 
     Qc = np.zeros((ns, ns))
     Qc[0:3, 0:3] = np.eye(3) * attitude_noise_var
@@ -120,20 +126,22 @@ def Init_Qc_matrix_random_walk(cfg, ns):
     # Build continuous-time kalman process noise variances matrix (Qc)
 
     tau = cfg.corr_time * 3600.0 # Correlation time tau in seconds
-    gyro_arw = cfg.imu_noise_factors[0] * np.deg2rad(cfg.gyro_arw) / np.sqrt(3600.0)  # deg/sqrt(h) -> rad/s/sqrt(s)
+    gyro_arw = cfg.imu_noise_factors[0] * np.deg2rad(cfg.gyro_arw) / np.sqrt(3600.0)  # deg/sqrt(h) -> rad/sqrt(s)
     acc_vrw = cfg.imu_noise_factors[1] * cfg.acc_vrw / np.sqrt(3600.0) # m/s/sqrt(h) -> m/s/sqrt(s)
     acc_bias_std = cfg.imu_noise_factors[2] * cfg.acc_bias_std * 1e-5 # mGal -> m/s^2,  1 Gal = 0.01 m/s^2
     gyro_bias_std = cfg.imu_noise_factors[3] * np.deg2rad(cfg.gyro_bias_std) / 3600.0 # deg/h -> rad/s
+    if cfg.scale_factors:
+        accel_scale_noise_var = (cfg.accel_scale_noise_density * cfg.imu_noise_factors[4])**2
+        gyro_scale_noise_var = (cfg.gyro_scale_noise_density * cfg.imu_noise_factors[5])**2
 
     Qc = np.zeros((ns, ns))
-    Qc[0:3, 0:3] = (gyro_arw ** 2) * np.eye(3) # White gyro noise driving attitude error (δθ): gyrarw^2
-    Qc[3:6, 3:6] = (acc_vrw ** 2) * np.eye(3) # White accel noise driving velocity error (δv): accvrw^2
-    Qc[9:12, 9:12] = (2.0 * acc_bias_std ** 2 / tau) * np.eye(3) # Gauss–Markov accel bias: 2*σ^2 / tau
-    Qc[12:15, 12:15] = (2.0 * gyro_bias_std ** 2 / tau) * np.eye(3) # Gauss–Markov gyro bias: 2*σ^2 / tau
+    Qc[0:3, 0:3] = (gyro_arw ** 2) * np.eye(3) # White gyro noise driving attitude error (dtheta): gyrarw^2
+    Qc[3:6, 3:6] = (acc_vrw ** 2) * np.eye(3) # White accel noise driving velocity error (dv): accvrw^2
+    Qc[9:12, 9:12] = (2.0 * acc_bias_std ** 2 / tau) * np.eye(3) # Gauss–Markov accel bias: 2*s^2 / tau
+    Qc[12:15, 12:15] = (2.0 * gyro_bias_std ** 2 / tau) * np.eye(3) # Gauss–Markov gyro bias: 2*s^2 / tau
     if ns == 21:
-        # Gauss–Markov gyro scale factor: 2*σ^2 / tau
-        Qc[18:21, 18:21] = (2.0 * cfg.gyro_scale_std ** 2 / tau) * np.eye(3)
-        Qc[15:18, 15:18] = (2.0 * cfg.acc_scale_std ** 2 / tau) * np.eye(3)
+        Qc[15:18, 15:18] = accel_scale_noise_var * np.eye(3)
+        Qc[18:21, 18:21] = gyro_scale_noise_var * np.eye(3)
     
     return Qc
 
@@ -149,6 +157,14 @@ def Skew_symmetric(a):
         [0, -a[2], a[1]],
         [a[2], 0, -a[0]],
         [-a[1], a[0], 0]
+    ])
+
+def Cross_product(a, b):
+    # Fixed-size 3-D cross product without np.cross's generalized-array overhead.
+    return np.array([
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0]
     ])
 
 def Radii_of_curvature(L):
@@ -169,14 +185,34 @@ def Radii_of_curvature(L):
 
 def Lever_Arm(C_b2f, v_ref_f, r_ref_f, omega_ib_b, r_lever_arm_b):
     r_lever_arm_f = C_b2f @ r_lever_arm_b
-    v_lever_arm_f = C_b2f @ np.cross(omega_ib_b, r_lever_arm_b)
+    v_lever_arm_f = C_b2f @ Cross_product(omega_ib_b, r_lever_arm_b)
     r_point_f = r_ref_f + r_lever_arm_f
     v_point_f = v_ref_f + v_lever_arm_f
     return(v_point_f, r_point_f)
 
 def ortho_C(C: np.ndarray) -> np.ndarray:
     # Check if CTM is ortho-normalized and if not, ortho-normalize it
-    ortho_norm = np.allclose(C.T @ C, np.eye(3), atol=1e-8) and np.isclose(np.linalg.det(C), 1.0, atol=1e-8)
+    diag_tol = 1e-5
+    offdiag_tol = 1e-8
+    CtC = C.T @ C
+    ortho_norm = (
+        abs(CtC[0, 0] - 1.0) <= diag_tol and
+        abs(CtC[1, 1] - 1.0) <= diag_tol and
+        abs(CtC[2, 2] - 1.0) <= diag_tol and
+        abs(CtC[0, 1]) <= offdiag_tol and
+        abs(CtC[0, 2]) <= offdiag_tol and
+        abs(CtC[1, 0]) <= offdiag_tol and
+        abs(CtC[1, 2]) <= offdiag_tol and
+        abs(CtC[2, 0]) <= offdiag_tol and
+        abs(CtC[2, 1]) <= offdiag_tol
+    )
+    if ortho_norm:
+        det_C = (
+            C[0, 0] * (C[1, 1] * C[2, 2] - C[1, 2] * C[2, 1])
+            - C[0, 1] * (C[1, 0] * C[2, 2] - C[1, 2] * C[2, 0])
+            + C[0, 2] * (C[1, 0] * C[2, 1] - C[1, 1] * C[2, 0])
+        )
+        ortho_norm = abs(det_C - 1.0) <= diag_tol
     if not ortho_norm:
         U, _, Vt = np.linalg.svd(C)
         R = U @ Vt
@@ -199,9 +235,9 @@ def Nav_equations_ECEF(tor_i, old_r_eb_e, old_v_eb_e, old_C_b_e, f_ib_b,
     #   old_C_b_e     previous body-to-ECEF-frame coordinate transformation matrix
     #   old_v_eb_e    previous velocity of body frame w.r.t. ECEF frame, resolved
     #                 along ECEF-frame axes (m/s)
-    #   f_ib_b        specific force of body frame w.r.t. ECEF frame, resolved
+    #   f_ib_b        specific force measured in the body frame, resolved
     #                 along body-frame axes, averaged over time interval (m/s^2)
-    #   omega_ib_b    angular rate of body frame w.r.t. ECEF frame, resolved
+    #   omega_ib_b    angular rate of body frame w.r.t. inertial frame, resolved
     #                 about body-frame axes, averaged over time interval (rad/s)
     # Outputs:
     #   r_eb_e        Cartesian position of body frame w.r.t. ECEF frame, resolved
@@ -250,18 +286,17 @@ def Nav_equations_ECEF(tor_i, old_r_eb_e, old_v_eb_e, old_C_b_e, f_ib_b,
 
     # UPDATE VELOCITY From (5.36)
     v_eb_e = old_v_eb_e + tor_i * (f_ib_e + gravity
-                - 2 * Skew_symmetric([0, 0, omega_ie]) @ old_v_eb_e)
+                - 2 * Cross_product([0, 0, omega_ie], old_v_eb_e))
 
     # UPDATE CARTESIAN POSITION From (5.38)
     r_eb_e = old_r_eb_e + 0.5 * tor_i * (v_eb_e + old_v_eb_e)
 
     return r_eb_e, v_eb_e, C_b_e
 
-
 def LC_KF_Predict(tor_s, est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias, P, Qc,
                 meas_f_ib_b, meas_omega_ib_b, LC_KF_config, gravity, geocentric_radius):
-    #LC_KF_Epoch - Implements one cycle of the loosely coupled INS/GNSS
-    # Kalman filter plus closed-loop correction of all inertial states
+    #LC_KF_Predict - Propagates the loosely coupled INS/GNSS
+    # Kalman filter error covariance; navigation states are propagated separately
     #
     # Inputs:
     #   tor_s                 propagation interval (s)
@@ -271,25 +306,16 @@ def LC_KF_Predict(tor_s, est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias, P, Qc,
     #   est_r_eb_e            prior estimated ECEF user position (m)
     #   est_IMU_bias          prior estimated IMU biases (body axes)
     #   P                     previous Kalman filter error covariance matrix
-    #   meas_f_ib_b           measured specific force
+    #   Qc                    continuous-time process-noise covariance matrix
+    #   meas_f_ib_b           corrected specific force in body axes (m/s^2)
+    #   meas_omega_ib_b       corrected angular rate in body axes (rad/s)
     #   LC_KF_config
-    #     .gyro_noise_PSD     Gyro noise PSD (rad^2/s)
-    #     .accel_noise_PSD    Accelerometer noise PSD (m^2 s^-3)
-    #     .accel_bias_PSD     Accelerometer bias random walk PSD (m^2 s^-5)
-    #     .gyro_bias_PSD      Gyro bias random walk PSD (rad^2 s^-3)
-    #     .pos_meas_SD            Position measurement noise SD per axis (m)
-    #     .vel_meas_SD            Velocity measurement noise SD per axis (m/s)
-    #     .lever_arm          IMU to GNSS lever arm
+    #     .nstates            number of error states (15 or 21)
+    #   gravity               ECEF gravity vector (m/s^2)
+    #   geocentric_radius     geocentric radius used in the gravity gradient (m)
     #
     # Outputs:
-    #   est_C_b_e_new     updated estimated body to ECEF coordinate 
-    #                      transformation matrix
-    #   est_v_eb_e_new    updated estimated ECEF user velocity (m/s)
-    #   est_r_eb_e_new    updated estimated ECEF user position (m)
-    #   est_IMU_bias_new  updated estimated IMU biases
-    #     Rows 1-3          estimated accelerometer biases (m/s^2) 
-    #     Rows 4-6          estimated gyro biases (rad/s)
-    #   P_matrix_new      updated Kalman filter error covariance matrix
+    #   P_propagated      propagated Kalman filter error covariance matrix
     
     abs_tor_s = abs(tor_s)
 
@@ -334,13 +360,38 @@ def LC_KF_GNSS_Update(GNSS_r_eb_e, GNSS_v_eb_e, pos_meas_SD, vel_meas_SD,
            
     # Set-up measurement matrix using (14.115)
     H = np.zeros((6, ns))
+    r_lever_arm_b = LC_KF_config.r_lever_arm_b
+    H[0:3, 0:3] = Skew_symmetric(est_C_b_e @ r_lever_arm_b)
     H[0:3, 6:9] = -np.eye(3)  # position meas to position states 
+    v_lever_arm_e = est_C_b_e @ Cross_product(meas_omega_ib_b, r_lever_arm_b)
+    H[3:6, 0:3] = Skew_symmetric(v_lever_arm_e)
     H[3:6, 3:6] = -np.eye(3)  # velocity meas to velocity states
+    if ns == 21:
+        # Gyro bias is removed before the scale-factor correction, so its
+        # lever-arm velocity derivative includes the scale correction gain.
+        gyro_scale = est_IMU_bias[9:12]
+        scale_gain = 1.0 - gyro_scale
+        omega_pre_scale = meas_omega_ib_b / scale_gain
+        H[3:6, 12:15] = (est_C_b_e @ Skew_symmetric(r_lever_arm_b)
+                         @ np.diag(scale_gain))
+        # Gyro scale-factor errors change antenna velocity through omega x r.
+        H[3:6, 18:21] = (est_C_b_e @ Skew_symmetric(r_lever_arm_b)
+                         @ np.diag(omega_pre_scale))
+    else:
+        H[3:6, 12:15] = est_C_b_e @ Skew_symmetric(r_lever_arm_b)
     
     # 6. Set-up measurement noise covariance matrix and rotate from NED to ECEF
     R = np.zeros((6, 6))
     R[0:3, 0:3] = C_n_e @ (np.eye(3) * np.array(pos_meas_SD)**2) @ C_n_e.T
     R[3:6, 3:6] = C_n_e @ (np.eye(3) * np.array(vel_meas_SD)**2) @ C_n_e.T
+
+    # A large velocity SD marks an unavailable velocity measurement. Remove
+    # its rows entirely so the update uses GNSS position only and can never
+    # pull the navigation velocity toward a placeholder value.
+    use_velocity = norm(vel_meas_SD) <= LC_KF_config.gnss_vel_err_thresh
+    if not use_velocity:
+        H = H[0:3, :]
+        R = R[0:3, 0:3]
 
     # Calculate Kalman gain using (3.21)
     K = P_propagated @ H.T @ inv(H @ P_propagated @ H.T + R)
@@ -353,9 +404,11 @@ def LC_KF_GNSS_Update(GNSS_r_eb_e, GNSS_v_eb_e, pos_meas_SD, vel_meas_SD,
     delta_z = np.zeros(6)
     delta_z[0:3] = GNSS_r_eb_e - est_r_gnss_e
     delta_z[3:6] = GNSS_v_eb_e - est_v_gnss_e
+    if not use_velocity:
+        delta_z = delta_z[0:3]
     
     # Update state estimates using (3.24)
-    x_est_new = x_est_propagated + K @ delta_z[:,None]
+    x_est_new = x_est_propagated + K @ delta_z[:, None]
     
     # 10. Update state estimation error covariance matrix using (3.25)
     I = np.eye(ns)
@@ -370,9 +423,9 @@ def LC_KF_GNSS_Update(GNSS_r_eb_e, GNSS_v_eb_e, pos_meas_SD, vel_meas_SD,
     est_v_eb_e_new = est_v_eb_e - x_est_new[3:6].flatten()
     est_r_eb_e_new = est_r_eb_e - x_est_new[6:9].flatten()
     
-    # Update IMU bias estimates
-    est_IMU_bias_new = est_IMU_bias + x_est_new[9:ns].flatten()
-
+    # Groves convention: IMU calibration errors are truth-minus-estimate.
+    est_IMU_bias_new = est_IMU_bias.copy()
+    est_IMU_bias_new[:ns-9] += x_est_new[9:ns].flatten()
     return(est_C_b_e_new, est_v_eb_e_new, est_r_eb_e_new, est_IMU_bias_new, P_new)
 
 def LC_KF_ZUPT_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, meas_f_ib_b,
@@ -385,9 +438,16 @@ def LC_KF_ZUPT_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, meas_f_ib_b,
     
     H = np.zeros((9, ns))    
     H[0:3, 3:6] = -np.eye(3)     # Velocity meas (0) to velocity states
-    H[3:6, 12:15] = -np.eye(3)    # Gyro bias meas to gyro bias states
+    # The IMU inputs are already bias-corrected. With Groves bias errors
+    # (truth minus estimate), both stationary residual derivatives are +I.
+    H[3:6, 12:15] = np.eye(3)    # Gyro bias meas to gyro bias states
     H[6:9, 0:3] = est_C_b_e.T @ Skew_symmetric(gravity_e) # gravity -> accel
-    H[6:9, 9:12] = -np.eye(3)    # Specific force directly observes accel bias
+    H[6:9, 9:12] = np.eye(3)    # Specific force directly observes accel bias
+    if ns == 21:
+        # Corrected IMU measurements vary as meas * delta_scale for the
+        # truth-minus-estimate multiplicative scale-factor error.
+        H[3:6, 18:21] = np.diag(meas_omega_ib_b)
+        H[6:9, 15:18] = np.diag(meas_f_ib_b)
 
     # Measurement noise covariance R
     R = np.zeros((9, 9))
@@ -398,7 +458,7 @@ def LC_KF_ZUPT_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, meas_f_ib_b,
     # Kalman gain
     K = P_propagated @ H.T @ inv(H @ P_propagated @ H.T + R)
     
-    # Measurement innovation (ZUPT: velocity should be zero, ZARU: angular rate should be zero)
+    # Measurement innovation (ZUPT: zero velocity; ZARU: angular rate equals Earth rate)
     delta_z = np.zeros((9, 1))
     delta_z[0:3, 0] = 0 - est_v_eb_e.flatten() * run_dir  # ZUPT: 0 - v_est
     delta_z[6:9, 0] = (meas_f_ib_b - f_pred_b).flatten() * run_dir
@@ -418,7 +478,7 @@ def LC_KF_ZUPT_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, meas_f_ib_b,
     est_C_b_e_new = (np.eye(3) - Skew_symmetric(x_est_new[0:3].flatten())) @ est_C_b_e 
     est_v_eb_e_new = est_v_eb_e - x_est_new[3:6].flatten()
     est_IMU_bias_new = est_IMU_bias.copy()
-    est_IMU_bias_new[:6] -= x_est_new[9:15].flatten()
+    est_IMU_bias_new[:ns-9] += x_est_new[9:ns].flatten()
     
     return(est_C_b_e_new, est_v_eb_e_new, est_IMU_bias_new, P_new)
 
@@ -446,31 +506,39 @@ def Align_Yaw(est_C_b_e, C_n_e, GNSS_v_eb_n, P, run_dir):
     return(C_b_e_new, P)
 
 # Non-Holonomic Constraint (NHC) Measurement Update
-def LC_KF_NHC_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, r_lever_arm_b,est_IMU_bias, P, LC_KF_config, coast):
+def LC_KF_NHC_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, r_lever_arm_v,est_IMU_bias, P, LC_KF_config):
     
     # Propagated state estimates are all zero due to closed-loop correction.
     ns = LC_KF_config.nstates
     x_est = np.zeros((ns, 1))
     
-    # Transform velocity to body frame
-    v_b = est_C_b_e.T @ est_v_eb_e + np.cross(meas_omega_ib_b, np.array(r_lever_arm_b))
+    # Form rear-axle velocity in the unrotated propagation body frame, then
+    # rotate it into the vehicle frame where the NHC is applied.
+    C_b_to_v = LC_KF_config.C_b_to_nhc
+    r_lever_arm_b = C_b_to_v.T @ r_lever_arm_v
+    v_b = (est_C_b_e.T @ est_v_eb_e +
+           Cross_product(meas_omega_ib_b, r_lever_arm_b))
+    v_v = C_b_to_v @ v_b
 
-    # Measurement matrix H_nhc: maps error state to v_b_y, v_b_z
-    H = np.zeros((2, ns))
-    H[:, 0:3] = Skew_symmetric(v_b)[1:3, :] # yaw/tilt correction pathway
-    H[:, 3:6] = -est_C_b_e.T[1:3, :]  # project ECEF velocity to body Y/Z
-    H[:, 12:15] = Skew_symmetric(r_lever_arm_b)[1:3, :] # gyro bias correction
+    # Build the complete Jacobian in the propagation frame, rotate it into
+    # the vehicle frame, then select lateral and vertical velocity rows.
+    H_b = np.zeros((3, ns))
+    # Attitude error is left-multiplicative and ECEF-resolved.
+    H_b[:, 0:3] = -est_C_b_e.T @ Skew_symmetric(est_v_eb_e)
+    H_b[:, 3:6] = -est_C_b_e.T
+    H_b[:, 12:15] = Skew_symmetric(r_lever_arm_b)
+    if ns == 21:
+        H_b[:, 18:21] = (Skew_symmetric(r_lever_arm_b)
+                         @ np.diag(meas_omega_ib_b))
+    H = (C_b_to_v @ H_b)[1:3, :]
     
     # Measurement noise
-    if coast:
-        R = np.eye(2) * LC_KF_config.nhc_vel_var_coast
-    else:
-        R = np.eye(2) * LC_KF_config.nhc_vel_var
+    R = np.eye(2) * LC_KF_config.nhc_vel_var
     
     # Kalman update
     K = P @ H.T @ inv(H @ P @ H.T + R)
 
-    delta_z = 0 - v_b[1:3].reshape((2, 1))  # meas - estimated
+    delta_z = -v_v[1:3].reshape((2, 1))  # zero minus estimated velocity
 
     # State update
     x_est += K @ delta_z
@@ -485,7 +553,7 @@ def LC_KF_NHC_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, r_lever_arm_b,est_I
     est_C_b_e_new = (np.eye(3) - Skew_symmetric(x_est[0:3].flatten())) @ est_C_b_e
     est_v_eb_e_new = est_v_eb_e - x_est[3:6].flatten()
     est_IMU_bias_new = est_IMU_bias.copy()
-    est_IMU_bias_new[:6] += x_est[9:15].flatten()
+    est_IMU_bias_new[:ns-9] += x_est[9:ns].flatten()
 
     return(est_C_b_e_new, est_v_eb_e_new, est_IMU_bias_new, P_new)
 
@@ -517,6 +585,43 @@ def Velocity_Match(outp, coast_start, coast_end):
     
     return(outp)  # values modified by pointers
 
+def GNSS_Noise_Gain(fix_status, cfg):
+    # Fix-quality gain applied to GNSS position SD; velocity SD is unchanged.
+    if fix_status == FIX:
+        return 1
+    elif fix_status == FLOAT:
+        return cfg.float_err_gain
+    elif fix_status == DGPS:
+        return cfg.float_err_gain
+    elif fix_status == SINGLE:
+        return cfg.single_err_gain
+    else:
+        return cfg.single_err_gain
+
+
+def Gate_GNSS_Measurements(fix_status, pos_meas_SD, vel_meas_SD, P, cfg):
+    adj_pos_meas_SD = pos_meas_SD.copy()
+    adj_vel_meas_SD = vel_meas_SD.copy()
+    pos_est_SD_3D = norm(np.sqrt(np.diag(P[6:9, 6:9])))
+    noise_gain = GNSS_Noise_Gain(fix_status, cfg)
+
+    # Ignore unused GNSS solution states by setting SDs to a large value
+    if noise_gain == 0:
+        adj_pos_meas_SD[:] = adj_vel_meas_SD[:] = 1e6
+        return False, adj_pos_meas_SD, adj_vel_meas_SD
+
+    # Fix status affects position accuracy much more than velocity accuracy.
+    # Keep the receiver-reported velocity SD independent of this gain.
+    adj_pos_meas_SD *= noise_gain
+
+    # Ignore measurements with excessive uncertainty.
+    pos_meas_SD_3D = norm(adj_pos_meas_SD)
+    if (pos_meas_SD_3D > cfg.gnss_pos_err_thresh or
+            pos_meas_SD_3D * cfg.gnss_SD_multiplier > pos_est_SD_3D):
+        return False, adj_pos_meas_SD, adj_vel_meas_SD
+
+    return True, adj_pos_meas_SD, adj_vel_meas_SD
+
 
 def Combine_Passes(profiles):
     outp = np.zeros_like(profiles[:,:,0])
@@ -542,7 +647,7 @@ def LP_Filt(data, cutoff, fs, order=4, causal=False):
         filtered = lfilter(b, a, data, axis=0)  # causal filter
     else:
         filtered = filtfilt(b, a, data, axis=0)  # forward-backward filter
-        return filtered
+    return filtered
 
 def Compute_Instantaneous_Vel(positions, dt):
     """

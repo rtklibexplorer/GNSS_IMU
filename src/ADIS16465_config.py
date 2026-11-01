@@ -9,106 +9,107 @@
  License:    BSD 3 License (see LICENSE file for details)
 
  Description:
-     Configuration file for KF-GINS dataset 2 available at 
-     https://github.com/i2Nav-WHU/KF-GINS-Matlab/tree/main/dataset2. 
-     which uses an ADIS16465 IMU and RTK GNSS.and includes a high-quality ground-truth 
-     See instructions in the file header in convert_KF_GINS_files.py for processing
-     this data
+    ADIS16465 configuration using INSLIB-equivalent noise and uncertainty.
 ===============================================================================
 """
+
 from imu_math import Init
 import numpy as np
 
-# IMU parameters (random walk)
-imu_config = 'random_walk'  # 'PSD' or 'random_walk'
-imu_offset   = [0., 0., 0]  # offset from system origin: forward, right, down
-gyro_arw = 0.1; # gyro angle random walk [deg/sqrt(h)]
-acc_vrw = 0.1; # accel velocity random walk [m/s/sqrt(h)]
-gyro_bias_std = 50; # [deg/h]
-acc_bias_std = 50; # [mGal]
-gyro_scale_std = 1000; # ppm
-acc_scale_std = 1000; # ppm
-corr_time = 1; # correlation time for accel and gyro biases and scales [hr]
+# Sensor installation and aiding configuration.
+imu_offset = [0.457, -0.275, -0.088] # m, rear-axle origin to IMU in propagation-body FRD
+nhc_pivot_offset = [0.0, 0.0, 0.0] # m, origin to rear-axle NHC pivot in vehicle FRD
+imu_rotate = [0.0, 0.0, 0.0]       # deg, raw IMU to propagation frame R/P/Y; if scale_factors=True, must be in multiples of 90 deg
+nhc_misalign = [0.0, 0.4411, 1.2165] # deg, propagation to vehicle/NHC frame R/P/Y
+gnss_imu_offset = [-0.073, 0.302, 0.087] # m, IMU to GNSS antenna in propagation-body FRD
+gnss_offset = np.array(imu_offset) + np.array(gnss_imu_offset) # m, origin to GNSS antenna in propagation-body FRD
 
-imu_misalign = np.array([0.0, 0.0, 0.0])   # IMU orientation
+nhc_enable = False                 # Boolean; disable NHC for the INSLIB NHC-off comparison
+nhc_epoch_count = 40               # IMU samples between NHC updates
+nhc_min_vel = 0.5                  # m/s, minimum 3-D speed for an NHC update
+nhc_gyro_thesh = 10.0              # deg/s, maximum absolute body-Z angular rate for an NHC update
+nhc_vel_SD = 0.05                  # m/s, lateral/vertical NHC velocity SD
 
-# GNSS parameters 
-gnss_offset = np.array([-0.37, 0.008, 0.353])  # offset from system origin: forward, right, down (m)
-gnss_pos_err_thresh = 10 # outlier threshold for max stdev of GNSS position measurmement (m)
+# INSLIB-equivalent IMU process noise.  The gyro noise factor combines the
+# 0.1 deg/sqrt(hr) gyro ARW with INSLIB's independent 1e-5 rad/sqrt(s)
+# attitude process-noise term in quadrature.
+imu_config = "random_walk"         # unitless IMU process-noise representation
+scale_factors = True               # Boolean; estimate accelerometer and gyro scale factors
+gyro_arw = 0.1                      # deg/sqrt(hr), ADIS16465 gyro angle random walk
+acc_vrw = 0.1                      # m/s/sqrt(hr), accelerometer velocity random walk
+gyro_bias_std = 25.0               # deg/hr, gyro bias process-model standard deviation
+acc_bias_std = 200.0               # mGal, accelerometer bias process-model standard deviation
+corr_time = 1.0                    # hr, bias and scale-factor process-model correlation time
+gyro_scale_noise_density = 1000.0e-6 * (2.0 / (corr_time * 3600.0))**0.5 # fraction/sqrt(s), gyro scale process noise
+accel_scale_noise_density = 1000.0e-6 * (2.0 / (corr_time * 3600.0))**0.5 # fraction/sqrt(s), accel scale process noise
+imu_noise_factors = [1.057, 1.0, 1.0, 1.0, 1.0, 1.0] # unitless gains: gyro white (includes INSLIB attitude-noise margin), accel white, accel bias, gyro bias, accel scale, gyro scale
 
-# ratio of specs to process noise stdevs to account for unmodeled errors
-imu_noise_factors = [1, 1, 1, 1, 1, 1] # attitude, velocity, accel bias, gyro bias, accel scale, gyro scale
-gnss_noise_factors = [1, 1]  # position, velocity
+# GNSS related parameters
+gnss_noise_factors = [1.0, 1.0]    # unitless gains: GNSS position and velocity
+gnss_pos_err_thresh = 10.0      # m, maximum accepted 3-D GNSS position SD
+gnss_vel_err_thresh = 10.0     # m/s, maximum accepted 3-D GNSS velocity SD
+gnss_SD_multiplier = 0.25      # unitless multiplier on GNSS position SD for filter-SD rejection
+float_err_gain = 1.0             # unitless GNSS position-SD multiplier for float solutions
+dgps_err_gain = 1.0              # unitless intended DGPS position-SD gain (currently unused; float_err_gain is applied)
+single_err_gain = 1.0            # unitless GNSS position-SD multiplier for single solutions
 
-# Initial uncertainties
-init =Init()
-init.att_unc = [0.2,0.2, 0.5] # initial attitude uncertainty per axis in (deg)
-init.bias_acc_unc = 50  # initial accel bias uncertainty (mGal)
-init.bias_gyro_unc = 50 # initial gyro bias uncertainty (deg/hr) 
-init.scale_acc_unc = 1000 # ppm
-init.scale_gyro_unc = 1000 #ppm
 
-# convert KF-GINS units to GNSS-IMU units
-gyro_scale_std *= 1e-6 # ppm -> unitless
-acc_scale_std *= 1e-6 # ppm -> unitless
-init.bias_acc_unc *= 1e-5  # mGal -> m/sec^2
-init.bias_gyro_unc /= 3600  # deg/hr -> deg/sec
-init.scale_acc_unc *= 1e-6 # ppm -> unitless
-init.scale_gyro_unc *= 1e-6 # ppm -> unitless
 
-# Run specific parameters
-scale_factors = False  # Kalman filter scale factor states enabled
-imu_t_off = 0  # time to add to IMU time stamps to acccount for logging delay (sec)
-run_dir = [1]  # run direction ([-1]=backwards, [1]=forwards, [-1,1] = combined)
-gnss_epoch_step = 1 # GNSS input sample decimation (1=use all GNSS samples)
-out_step = 1  # Output decimation [1=include all samples]
-out_frame = 'imu'   # 'imu','gnss', or 'origin'
-float_err_gain = 1 # mulitplier on pos/vel stdevs if in float mode
-single_err_gain = 1  # mulitplier on pos/vel stdevs if in single mode
+# INSLIB initial covariance values supported directly by GNSS_IMU.
+init = Init()                       # initial-uncertainty parameter container
+init.att_unc = [0.5, 0.5, 1.0]    # deg, initial roll/pitch/yaw SD
+init.bias_acc_unc = 0.05           # m/s^2, initial accelerometer-bias SD
+init.bias_gyro_unc = 0.5           # deg/s, initial gyro-bias SD
+init.scale_acc_unc = 100.0e-6      # fraction, initial accelerometer-scale SD (100 ppm)
+init.scale_gyro_unc = 1000.0e-6    # fraction, initial gyro-scale SD (1000 ppm)
+init_rpy = [1.72019, -0.10776, 274.48263] # deg, first truth.nav roll/pitch/yaw
 
-# Velocity matching
-vel_match = False # do velocity matching at end of coast
-vel_match_min_t = 5 # min GNSS outage to invoke vel match (seconds)
+# ZUPT parameters
+zupt_enable = False                # INSLIB ADIS16465 benchmark disables automatic ZUPT
+zupt_epoch_count = 200             # consecutive stationary IMU samples averaged before a ZUPT update
+zupt_accel_thresh = 1.0            # m/s^2, maximum acceleration-norm error for ZUPT
+zupt_gyro_thresh = 1.0             # deg/s, maximum angular-rate norm for ZUPT
+zupt_vel_thresh = 0.1              # m/s, maximum 3-D velocity norm for ZUPT
+zupt_vel_SD = 0.02                 # m/s, zero-velocity measurement SD
+zupt_accel_SD = 0.05               # m/s^2, stationary accelerometer measurement SD
+zaru_gyro_SD = 0.05                # deg/s, zero-angular-rate measurement SD
 
-# Zero Velocity update
-zupt_enable = False
-zupt_epoch_count = 50 # epochs to average for update
-zupt_accel_thresh = 0.25  # max accel thresh (m/sec^2)
-zupt_gyro_thresh = 0.25  # max ang accel thesh (deg/sec)
-zupt_vel_SD = 0.02     # zero vel update stdev (m/sec)
-zupt_accel_SD = 0.02 # zero vel accelerometer stdev (m/sec^2)
-zaru_gyro_SD = 0.02   # zero angular accel stdev (deg/sec)
+# Yaw align parameters
+yaw_align = False              # Boolean; align yaw using GNSS velocity heading
+yaw_align_min_vel = 0.25         # m/s, speed threshold to start yaw alignment
+yaw_align_max_vel = 5            # m/s, speed threshold to complete yaw alignment
+yaw_align_min_fix_state = 1      # unitless RTKLIB quality code (1=fixed)
+init_yaw_with_mag = False        # Boolean; initialize yaw from magnetometer
 
-# Initial yaw alignment
-yaw_align = False # use GNSS heading to initialize yaw
-yaw_align_min_vel = 0.25  # threshold to start yaw align (m/sec)
-yaw_align_max_vel = 1.25  # threshold to end yaw align (m/sec)
-yaw_align_min_fix_state = 1 # 1=fix, 2=float,5=single
-init_yaw_with_mag = False # use magnetometer to init yaw
+# Velocity match parameters
+vel_match = False                # Boolean; enable end-of-coast velocity matching
+vel_match_min_t = 5.0            # s, minimum outage duration for velocity matching
 
-# Non-holomonic constrains (NHC) update
-nhc_enable = False
-nhc_epoch_count = 20
-nhc_min_vel = 0.5
-nhc_gyro_thesh = 10 # deg/sec
-nhc_vel_SD = 0.10 # standard dev m/sec 
-nhc_vel_SD_coast = 0.05 # standard dev m/sec
+# Configure run start/length and simulated GNSS outages
+start_epoch = 0                  # IMU sample index at processing start
+num_epochs = 0                   # IMU sample count to process (0=all except final 100-sample buffer)
 
-# Testing/Debug
-disable_imu = False  # enable to Run GNSS only
-start_coast = 0   # start of simulated GNSS outages (secs)
-end_coast = 0 # end of simulated GNSS outages (secs before end)
-coast_len = 0 # length of simulated  GNSS outages (secs)
-start_epoch = 0 # start run at this epoch
-num_epochs = 0  # num epochs to run (0=all)
-gyro_bias_err = [0,0,0] #[-0.02, 0, 0.1]  # Add constant error to gyro biases (deg/sec)
-accel_bias_err = [0, 0, 0]  # Add constant error to acc biases (m/sec^2)
-gyro_scale_factor = [1.0, 1.0, 1.0]
-accel_scale_factor = [1, 1, 1]
-init_rpy = [-0.23, 0.24, 179.5]   # initial roll, pitch, yaw (degrees)
+start_coast = 300.0              # s from first processed IMU epoch, first simulated outage
+end_coast = 0.0                  # s before final GNSS epoch to stop simulated outages
+coast_len = 60.0                 # s, simulated outage duration
+coast_gap = 240.0                # s, GNSS-available gap between simulated outages
 
-# Plotting
-plot_results = True
-plot_bias_data = True    # plot accel and gyro bias states
-plot_imu_data = False  # plot accel, gyro raw data
-plot_unc_data = False  # plot Kalman filter uncertainties
+# Other run related configuration
+imu_t_off = 0.0                  # s, added to IMU timestamps
+disable_imu = False              # Boolean; disable inertial propagation
+run_dir = [1]                    # unitless direction: -1 backward, +1 forward
+gnss_epoch_step = 1              # GNSS samples per measurement update
+out_step = 10                    # IMU samples per output record
+out_frame = "imu"                # unitless frame selector: "imu", "gnss", or "origin"
+
+# Initial IMU bias/scale factor errors
+gyro_bias_err = [0.0, 0.0, 0.0] # deg/s, simulated XYZ gyro bias
+accel_bias_err = [0.0, 0.0, 0.0] # m/s^2, simulated XYZ accelerometer bias
+gyro_scale_factor = [1.0, 1.0, 1.0] # unitless XYZ multiplicative factors
+accel_scale_factor = [1.0, 1.0, 1.0] # unitless XYZ multiplicative factors
+
+# Plot options
+plot_results = True              # Boolean; plot navigation results
+plot_bias_data = True            # Boolean; plot estimated IMU biases
+plot_imu_data = False            # Boolean; plot raw IMU measurements
+plot_unc_data = False            # Boolean; plot Kalman state uncertainties

@@ -21,76 +21,110 @@ Based on matlab code and textbook by Paul Groves, "Principles of GNSS, Inertial,
 ===============================================================================
 """
 
+import argparse
+import importlib.util
+from pathlib import Path
+
 import numpy as np
+from copy import deepcopy
 from numpy.linalg import norm
 from os.path import join
 from imu_math import (Init_P_matrix, Init_Qc_matrix_PSD, Init_Qc_matrix_random_walk, 
                       Nav_equations_ECEF, LC_KF_Predict, LC_KF_GNSS_Update, LC_KF_ZUPT_Update, 
                       Align_Yaw, LC_KF_NHC_Update, Lever_Arm, ortho_C,
-                      LC_KF_Config, Velocity_Match, Combine_Passes, Gravity_ECEF, Reverse_Data_Dir)
+                      LC_KF_Config, Velocity_Match, Combine_Passes, Gravity_ECEF, Reverse_Data_Dir,
+                      Gate_GNSS_Measurements, GNSS_Noise_Gain)
 from imu_files import Read_GNSS_data, Read_IMU_data, Write_GNSS_data
 from imu_plot import Plot_Results, Plot_Biases, Plot_IMU, Plot_Uncertainties
 from imu_transforms import (CTM_to_Euler, Euler_to_CTM, pvc_GNSS_to_ECEF, compute_C_e_n)
 
 ##########  Data selection and run configuration ########################################
 
-# Uncomment these lines to run an example of walking with a handheld GNSS receiver
-# import walk_config as cfg
-# dataDir = r'..\data\walk_0827'
-# fileIn = '1730_sf'
+# These defaults are used when this file is run directly without arguments.
+# run_benchmark.py supplies the same three values on the command line.
+script_dir = Path(__file__).resolve().parent
+default_config = script_dir / 'ADIS16465_config.py'
+default_data_dir = script_dir.parent / 'data' / 'awesome_gins' / 'converted'
+default_file_in = 'ADIS16465_sf'
 
-# Uncomment these lines to run an example of driving with a roof mounted GNSS receiver
-import drive_config as cfg
-dataDir = r'..\data\drive_0708'
-fileIn = '1934_sf'
 
-# Uncomment these lines to run a KF-GINS sample data set.  See convert_KF_GINS_files.py for 
-# instructions
-# import ADIS16465_config as cfg
-# dataDir = r'..\data\KF_GINS'
-# fileIn = 'ADIS16465_sf'
+def load_config(config_file):
+    """Load a config by filename without requiring it to be on sys.path."""
+    config_path = Path(config_file)
+    if not config_path.is_absolute():
+        config_path = script_dir / config_path
+    if config_path.suffix == '':
+        config_path = config_path.with_suffix('.py')
+    spec = importlib.util.spec_from_file_location(config_path.stem, config_path)
+    if spec is None or spec.loader is None:
+        raise ImportError('Cannot load config file: %s' % config_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
+
+parser = argparse.ArgumentParser(description='Run the GNSS/IMU filter.')
+parser.add_argument('--config', default=str(default_config),
+                    help='Python configuration file')
+parser.add_argument('--data-dir', default=str(default_data_dir),
+                    help='Folder containing converted GNSS and IMU files')
+parser.add_argument('--file-in', default=default_file_in,
+                    help='Input filename stem, for example ADIS16465_sf')
+# These overrides let run_benchmark.py avoid editing configuration files.
+parser.add_argument('--outage-start', type=float)
+parser.add_argument('--outage-duration', type=float)
+parser.add_argument('--outage-gap', type=float)
+parser.add_argument('--nhc-enable', choices=('true', 'false'))
+parser.add_argument('--out-step', type=int)
+parser.add_argument('--full-data', action='store_true')
+parser.add_argument('--no-plots', action='store_true')
+args = parser.parse_args()
+
+cfg = load_config(args.config)
+dataDir = args.data_dir
+fileIn = args.file_in
+
+if args.outage_start is not None:
+    cfg.start_coast = args.outage_start
+if args.outage_duration is not None:
+    cfg.coast_len = args.outage_duration
+if args.outage_gap is not None:
+    cfg.coast_gap = args.outage_gap
+if args.nhc_enable is not None:
+    cfg.nhc_enable = args.nhc_enable == 'true'
+if args.out_step is not None:
+    cfg.out_step = args.out_step
+if args.full_data:
+    cfg.start_epoch = 0
+    cfg.num_epochs = 0
+if args.no_plots:
+    cfg.plot_results = False
+    cfg.plot_bias_data = False
+    cfg.plot_unc_data = False
+    cfg.plot_imu_data = False
 
 ######### Description of inputs/outputs ########################################
 
 # Inputs:
 #   in_gnss      GNSS input measurements
 #   in_imu       IMU input measurements
-#   num_epochs    Number of epochs of profile data
-#   initialization_errors
-#     .delta_r_eb_n     position error resolved along NED (m)
-#     .delta_v_eb_n     velocity error resolved along NED (m/s)
-#     .delta_eul_nb_n   attitude error as NED Euler angles (rad)
-#   IMU_errors
-#     .delta_r_eb_n     position error resolved along NED (m)
-#     .b_a              Accelerometer biases (m/s^2)
-#     .b_g              Gyro biases (rad/s)
-#     .M_a              Accelerometer scale factor and cross coupling errors
-#     .M_g              Gyro scale factor and cross coupling errors
-#     .G_g              Gyro g-dependent biases (rad-sec/m)
-#     .accel_noise_root_PSD   Accelerometer noise root PSD (m s^-1.5)
-#     .gyro_noise_root_PSD    Gyro noise root PSD (rad s^-0.5)
-#     .accel_quant_level      Accelerometer quantization level (m/s^2)
-#     .gyro_quant_level       Gyro quantization level (rad/s)
-#   LC_KF_config
-#     .init_att_unc           Initial attitude uncertainty per axis (deg)
-#     .init_vel_unc           Initial velocity uncertainty per axis (m/s)
-#     .init_pos_unc           Initial position uncertainty per axis (m)
-#     .init_b_a_unc           Initial accel. bias uncertainty (m/s^2)
-#     .init_b_g_unc           Initial gyro. bias uncertainty (deg/s)
-#     .gyro_noise_PSD         Gyro noise PSD (deg^2/s)
-#     .accel_noise_PSD        Accelerometer noise PSD (m^2 s^-3)
-#     .accel_bias_PSD         Accelerometer bias random walk PSD (m^2 s^-5)
-#     .gyro_bias_PSD          Gyro bias random walk PSD (deg^2 s^-3)
-#     .pos_meas_SD            Position measurement noise SD per axis (m)
-#     .vel_meas_SD            Velocity measurement noise SD per axis (m/s)
+#   num_epochs   Number of IMU samples to process
+#   cfg          Selected *_config.py module; defines noise, aiding, and run settings
+#     .init.att_unc          Initial roll/pitch/yaw SD (deg; converted to rad internally)
+#     .init.bias_acc_unc     Initial accelerometer-bias SD (m/s^2)
+#     .init.bias_gyro_unc    Initial gyro-bias SD (deg/s; converted to rad/s internally)
+#     .init.scale_acc_unc    Initial accelerometer-scale SD (fraction; 21-state filter)
+#     .init.scale_gyro_unc   Initial gyro-scale SD (fraction; 21-state filter)
+#   LC_KF_config Internal filter settings derived from cfg
+#   Qc           Continuous-time process-noise covariance from cfg IMU noise settings
+# Position and velocity measurement SDs come from in_gnss, scaled by cfg.
 #
 # Outputs:
 #   outp               Navigation solution as a motion profile array
 #   out_IMU_bias_est   Kalman filter IMU bias estimate array
 #   out_KF_SD          Output Kalman filter state uncertainties
 #
-# Format of output profiles:
+# Format of output profiles (per pass; position/velocity point selected by cfg.out_frame):
 #  Column 0: time (sec)
 #  Column 1: X ECEF (m)
 #  Column 2: Y ECEF (m)
@@ -102,18 +136,18 @@ fileIn = '1934_sf'
 #  Column 8: pitch angle of body w.r.t NED (rad)
 #  Column 9: yaw angle of body w.r.t NED (rad)
 #  Column 10: coast status (1=coast)
-#  Column 11: stdev: X ECEF (m)
-#  Column 12: stdev: Y ECEF (m)
-#  Column 13: stdev: Z ECEF (m)
-#  Column 14: stdev: X ECEF velocity (m/s)
-#  Column 15: stdev: Y ECEF velocity (m/s)
-#  Column 16: stdev: Z ECEF velocity (m/s)
-#  Column 17: stdev: roll (rad)
-#  Column 18: stdev: pitch (rad)
-#  Column 19: stdev: yaw (rad)
-#  Column 20: X body velocity (m/s)
-#  Column 21: Y body velocity (m/s)
-#  Column 22: Z body velocity (m/s)
+#  Column 11: stdev: north position (m)
+#  Column 12: stdev: east position (m)
+#  Column 13: stdev: down position (m)
+#  Column 14: stdev: north velocity (m/s)
+#  Column 15: stdev: east velocity (m/s)
+#  Column 16: stdev: down velocity (m/s)
+#  Column 17: stdev: north-resolved attitude error (rad)
+#  Column 18: stdev: east-resolved attitude error (rad)
+#  Column 19: stdev: down-resolved attitude error (rad)
+#  Column 20: NHC-pivot forward velocity (m/s)
+#  Column 21: NHC-pivot right velocity (m/s)
+#  Column 22: NHC-pivot down velocity (m/s)
 
 #
 # Format of output IMU biases array:
@@ -124,6 +158,8 @@ fileIn = '1934_sf'
 #  Column 4: estimated X gyro bias (rad/s)
 #  Column 5: estimated Y gyro bias (rad/s)
 #  Column 6: estimated Z gyro bias (rad/s)
+#  Columns 7-9: estimated XYZ accelerometer-scale errors (fraction; if enabled)
+#  Columns 10-12: estimated XYZ gyro-scale errors (fraction; if enabled)
 #
 #
 # Format of KF state uncertainties array:
@@ -143,24 +179,31 @@ fileIn = '1934_sf'
 #  Column 13: X gyro bias uncertainty (rad/s)
 #  Column 14: Y gyro bias uncertainty (rad/s)
 #  Column 15: Z gyro bias uncertainty (rad/s)
+#  Columns 16-18: XYZ accelerometer-scale uncertainty (fraction; if enabled)
+#  Columns 19-21: XYZ gyro-scale uncertainty (fraction; if enabled)
+# Attitude, velocity, and position error uncertainties use ECEF axes;
+# bias and scale-factor uncertainties use propagation-body axes.
 
 # Based on Matlab code from Paul Groves
-# License: BSD; see license.txt for details
+# License: BSD; see LICENSE for details
 
 
 # Constants
 directions = ['','forward', 'backward']
-FIX, FLOAT, SINGLE = 1,2,5   # GNSS solution states
 R_0 = 6378137          # radius of WGS84
 ecc = 0.0818191908425  # eccentricity of WGS84
-g = 9.80665  # Default gravity (m/sec^2)
+g0 = 9.80665  # standard gravity [m/s^2], used for g-to-SI conversion
 
 ############  Start of main code ##############################
 
 # Initialization
 LC_KF_config = LC_KF_Config()
-C_imu_misalign = Euler_to_CTM(np.deg2rad(np.array(cfg.imu_misalign)))
+C_imu_rotate = Euler_to_CTM(np.deg2rad(np.array(cfg.imu_rotate)))
 npasses = len(cfg.run_dir)
+LC_KF_config.gnss_vel_err_thresh = cfg.gnss_vel_err_thresh  # m/s
+# Paul Groves error state:
+# [delta_theta, v_hat-v, r_hat-r, b_a-b_a_hat, b_g-b_g_hat].
+# Navigation corrections subtract errors; bias corrections add them.
 ns = LC_KF_config.nstates = 21 if cfg.scale_factors else 15
 nbs = 12 if cfg.scale_factors else 6
 
@@ -175,19 +218,23 @@ LC_KF_config.zupt_vel_var = cfg.zupt_vel_SD**2
 LC_KF_config.zupt_accel_var = cfg.zupt_accel_SD**2
 LC_KF_config.zaru_gyro_var = np.deg2rad(cfg.zaru_gyro_SD)**2
 LC_KF_config.nhc_vel_var = cfg.nhc_vel_SD**2
-LC_KF_config.nhc_vel_var_coast = cfg.nhc_vel_SD_coast**2
+LC_KF_config.C_b_to_nhc = Euler_to_CTM(
+    np.deg2rad(np.array(cfg.nhc_misalign)))
+# Configured offsets point from the system origin to each point. IMU and GNSS
+# offsets use propagation axes; the NHC pivot uses vehicle/NHC FRD axes.
+r_imu_to_nhc_pivot_v = (np.array(cfg.nhc_pivot_offset) -
+                        LC_KF_config.C_b_to_nhc @ np.array(cfg.imu_offset))
+r_imu_to_nhc_pivot_b = LC_KF_config.C_b_to_nhc.T @ r_imu_to_nhc_pivot_v
 
-# Calculate initial uncertainties
-LC_KF_Config.init = cfg.init
-LC_KF_Config.init.att_unc = np.deg2rad(cfg.init.att_unc)
-LC_KF_Config.init.bias_gyro_unc = np.deg2rad(cfg.init.bias_gyro_unc)
+LC_KF_config.init = deepcopy(cfg.init)
+LC_KF_config.init.att_unc = np.deg2rad(cfg.init.att_unc)
+LC_KF_config.init.bias_gyro_unc = np.deg2rad(cfg.init.bias_gyro_unc)
 
 # lever arm in body frame
 LC_KF_Config.r_lever_arm_b = np.array(cfg.gnss_offset) - np.array(cfg.imu_offset)
-
 # Load input measurements
-in_gnss, num_gnss, ok = Read_GNSS_data(join(dataDir, 'gnss_%s.pos' % fileIn ))
-in_imu, num_epochs, ok = Read_IMU_data(join(dataDir, 'imu_%s.csv' % fileIn ))
+in_gnss, num_gnss, ok = Read_GNSS_data(join(dataDir, 'gnss_%s.pos' % fileIn))
+in_imu, num_epochs, ok = Read_IMU_data(join(dataDir, 'imu_%s.csv' % fileIn))
 
 # strip start of data if start_epoch != 0
 if cfg.start_epoch > 0:
@@ -201,7 +248,7 @@ else:
     plot_t0 = 0
 
 # Add simulated errors to input measurements for eval purposes
-in_imu[:,1:4] = (in_imu[:,1:4] + np.array(cfg.accel_bias_err) / g) * cfg.accel_scale_factor
+in_imu[:,1:4] = (in_imu[:,1:4] + np.array(cfg.accel_bias_err) / g0) * cfg.accel_scale_factor
 in_imu[:,4:7] = (in_imu[:,4:7] + np.deg2rad(cfg.gyro_bias_err)) * cfg.gyro_scale_factor
  
 dt_gnss = np.median(np.diff(in_gnss[:100,0])) # use median to find sample time
@@ -214,6 +261,9 @@ if cfg.num_epochs != 0:
     num_epochs = min(num_epochs, cfg.num_epochs)  
 else:
     num_epochs -= 100  # provide buffer to allow adjusting time offset
+in_imu = in_imu[:num_epochs]
+in_gnss = in_gnss[in_gnss[:,0] <= in_imu[-1,0] + cfg.imu_t_off]
+num_gnss = len(in_gnss)
     
 # Initialize output arrays
 outp = np.zeros((num_epochs, 23, npasses))
@@ -221,17 +271,16 @@ out_IMU_bias_est = np.zeros((num_gnss, nbs + 1, npasses))
 out_KF_SD = np.zeros((int(num_gnss / cfg.gnss_epoch_step) + 1, ns + 1, npasses))
 
 # Setup simulated coast intervals (only used for eval)
-s = in_gnss[0,0] + cfg.start_coast
+s = in_imu[0,0] + cfg.imu_t_off + cfg.start_coast
 e = in_gnss[-1,0] - cfg.end_coast
-ix = np.where((in_imu[:num_epochs,0] > s) & (in_imu[:num_epochs,0] < e))[0]
-coast = 1
-for i in ix:
-    if in_imu[i,0] < s + cfg.coast_len:
-        outp[i,10,:] = coast
-    else:
-        # delay between coasts is twice length of coast
-        s = s + (coast + 1) * cfg.coast_len 
-        coast = 1 - coast
+coast_times = in_imu[:num_epochs, 0] + cfg.imu_t_off
+gnss_coast = np.zeros(num_gnss, dtype=bool)
+while cfg.coast_len > 0 and s < e:
+    coast_end = min(s + cfg.coast_len, e)
+    ix = np.where((coast_times >= s) & (coast_times < coast_end))[0]
+    outp[ix,10,:] = 1
+    gnss_coast |= ((in_gnss[:,0] >= s) & (in_gnss[:,0] < coast_end))
+    s += cfg.coast_len + cfg.coast_gap
 
 # loop through forward and backward passes
 for p in range(npasses):
@@ -259,7 +308,11 @@ for p in range(npasses):
     est_v_eb_n = in_gnss[0, 14:17]  # initial NED velocity
     r_gnss_e, v_gnss_e, est_C_b_e =  pvc_GNSS_to_ECEF(est_L_b, est_lambda_b, 
             est_h_b, est_v_eb_n, est_C_b_n)
-    est_v_eb_e, est_r_eb_e = Lever_Arm(est_C_b_e, v_gnss_e, r_gnss_e, [0,0,0], - LC_KF_Config.r_lever_arm_b)
+    r_gnss_e += v_gnss_e * (t_imu[0] - t_gnss[0])
+    meas_omega_init_b = C_imu_rotate @ in_imu[0, 4:7]
+    est_v_eb_e, est_r_eb_e = Lever_Arm(
+        est_C_b_e, v_gnss_e, r_gnss_e, meas_omega_init_b,
+        -LC_KF_Config.r_lever_arm_b)
     prev_time = start_time = t_imu[0]
     
     # Calculate earth radius and gravity for starting location
@@ -270,13 +323,35 @@ for p in range(npasses):
     
     # Initial output profile
     outp[0, 0, p] = prev_time
-    outp[0, 1:4, p] = est_r_eb_e
-    outp[0, 4:7, p] = est_v_eb_e
+    if cfg.out_frame == 'gnss':
+        outp[0, 1:4, p] = r_gnss_e
+        outp[0, 4:7, p] = v_gnss_e
+    elif cfg.out_frame == 'origin':
+        est_v_ref_e, est_r_ref_e = Lever_Arm(
+            est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_init_b,
+            -np.array(cfg.imu_offset))
+        outp[0, 1:4, p] = est_r_ref_e
+        outp[0, 4:7, p] = est_v_ref_e
+    else:  # 'imu'
+        outp[0, 1:4, p] = est_r_eb_e
+        outp[0, 4:7, p] = est_v_eb_e
     outp[0, 7:10, p] = CTM_to_Euler(est_C_b_n.T).flatten()
+    est_v_nhc_pivot_e, _ = Lever_Arm(
+        est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_init_b,
+        r_imu_to_nhc_pivot_b)
+    outp[0, 20:23, p] = (LC_KF_config.C_b_to_nhc @ est_C_b_e.T @
+                         est_v_nhc_pivot_e)
     
     # Initialize Kalman filter P matrix and IMU bias states
-    C_e_n = compute_C_e_n(est_L_b, est_lambda_b,) # Map to ECEF
-    P = Init_P_matrix(LC_KF_config, C_e_n, in_gnss[0,6:9], in_gnss[0,17:20])
+    C_e_n = compute_C_e_n(est_L_b, est_lambda_b,) # Map ECEF to NED
+    # Scale initial GNSS position uncertainty based on fix quality.
+    init_noise_gain = GNSS_Noise_Gain(fix[0], cfg)
+    if init_noise_gain == 0:
+        init_noise_gain = 1e6  # Set variance very high if this is unused state
+    # Apply configured noise factors and the fix-quality gain to initial position/velocity SDs.
+    init_pos_meas_SD = in_gnss[0,6:9] * cfg.gnss_noise_factors[0] * init_noise_gain
+    init_vel_meas_SD = in_gnss[0,17:20] * cfg.gnss_noise_factors[1] * init_noise_gain
+    P = Init_P_matrix(LC_KF_config, C_e_n, init_pos_meas_SD, init_vel_meas_SD)
     est_IMU_bias = np.zeros(nbs)
     out_IMU_bias_est[0, 0, p] = prev_time
     out_IMU_bias_est[0, 1:nbs+1, p] = est_IMU_bias
@@ -294,6 +369,8 @@ for p in range(npasses):
     # Init internal states
     vel_match_flag = False
     yaw_aligned = not cfg.yaw_align  # Init yaw as unaligned if yaw align option is enabled
+    gnss_velocity_available = (norm(init_vel_meas_SD) <=
+                               LC_KF_config.gnss_vel_err_thresh)
 
     # Loop through IMU epocs
     for epoch in range(1, num_epochs):
@@ -303,36 +380,42 @@ for p in range(npasses):
         # Update time and coast status
         time = t_imu[epoch]
         tor_i = time - prev_time
-        if tor_i < 1e-5:
+        if tor_i * run_dir < 1e-5:
             outp[epoch,:,p] = outp[epoch-1,:,p]
             continue
         coast = outp[epoch,10,p]  # get coast status for this epoch
         
-        # Get next IMU measurements and correct for biases and misalignment
-        meas_f_ib_b = C_imu_misalign @ in_imu[epoch, 1:4] * g
+        # Get next IMU measurements and correct for biases and rotation
+        raw_f_ib_b = C_imu_rotate @ in_imu[epoch, 1:4] * g0
+        raw_omega_ib_b = C_imu_rotate @ in_imu[epoch, 4:7]
+        meas_f_ib_b = raw_f_ib_b.copy()
         meas_f_ib_b -= est_IMU_bias[0:3]
-        meas_omega_ib_b = C_imu_misalign @ in_imu[epoch, 4:7]
+        meas_omega_ib_b = raw_omega_ib_b.copy()
         meas_omega_ib_b -= est_IMU_bias[3:6]
         if cfg.scale_factors:
             meas_f_ib_b *= (1 - est_IMU_bias[6:9])
             meas_omega_ib_b *= (1 - est_IMU_bias[9:12])
 
-        # Update estimated navigation solution unless in IMU disabled mode
-        if time * run_dir >= t_gnss[0] * run_dir: # don't run IMU before first GNSS sample
-            if not cfg.disable_imu:  # disable IMU for eval only
-                est_r_eb_e, est_v_eb_e, est_C_b_e = Nav_equations_ECEF(
-                    tor_i, est_r_eb_e, est_v_eb_e, est_C_b_e,
-                        meas_f_ib_b, meas_omega_ib_b, gravity)
-            else:
-                est_r_eb_e += est_v_eb_e * tor_i  # assume constant velocity if no IMU
+        # Split propagation at GNSS measurement timestamps. The IMU record is
+        # an interval-average measurement, so the same value applies to both
+        # portions of a split interval.
+        propagation_time = prev_time
 
-        # Kalman state prediction if run for both IMU and GNSS measurements
-        P = LC_KF_Predict(tor_i, est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias,
-                       P, Qc, meas_f_ib_b, meas_omega_ib_b, LC_KF_config,
-                       gravity, geocentric_radius)
-    
         # Check for next GNSS measurement
         while time * run_dir >= time_next_GNSS * run_dir:
+            tor_gnss = time_next_GNSS - propagation_time
+            if abs(tor_gnss) > 1e-12:
+                if not cfg.disable_imu:  # disable IMU for eval only
+                    est_r_eb_e, est_v_eb_e, est_C_b_e = Nav_equations_ECEF(
+                        tor_gnss, est_r_eb_e, est_v_eb_e, est_C_b_e,
+                        meas_f_ib_b, meas_omega_ib_b, gravity)
+                else:
+                    est_r_eb_e += est_v_eb_e * tor_gnss
+                P = LC_KF_Predict(
+                    tor_gnss, est_C_b_e, est_v_eb_e, est_r_eb_e,
+                    est_IMU_bias, P, Qc, meas_f_ib_b, meas_omega_ib_b,
+                    LC_KF_config, gravity, geocentric_radius)
+                propagation_time = time_next_GNSS
             # Get next GNSS measurement
             epoch_GNSS += 1   
             in_gnss_ptr += gnss_epoch_inc
@@ -349,46 +432,52 @@ for p in range(npasses):
             if cfg.yaw_align and not yaw_aligned:
                 if norm(v_gnss_n[:2]) > cfg.yaw_align_min_vel: 
                     if fix[in_gnss_ptr] <= cfg.yaw_align_min_fix_state:
-                        print('   %.2f sec: Yaw align: ' % (time - t_gnss[0]), end='')
+                        print('   %.2f sec: Yaw align: ' % (time_GNSS - t_gnss[0]), end='')
                         est_C_b_e, P = Align_Yaw(est_C_b_e, C_e_n.T, v_gnss_n, P, run_dir)
                         if norm(v_gnss_n[:2]) > cfg.yaw_align_max_vel:
                             yaw_aligned = True  # disable any further yaw alignment
             
-            # Process GNSS measurement if not in coast mode
-            if coast == 0:
-                # Adjust measurement uncertainty based on fix status
-                if fix[in_gnss_ptr] == FIX or cfg.disable_imu:
-                    noise_gain = 1
-                elif fix[in_gnss_ptr] == FLOAT: 
-                    noise_gain = cfg.float_err_gain
-                else: # SINGLE: 
-                    noise_gain = cfg.single_err_gain
-                    
-                if noise_gain != 0:  # skip measurement if noise_gain set to zero
-                    pos_meas_SD *= noise_gain
-                    vel_meas_SD *= noise_gain
+            # Gate by the GNSS measurement time, including split IMU epochs.
+            if not gnss_coast[in_gnss_ptr]:
+                valid_gnss, adj_pos_meas_SD, adj_vel_meas_SD = Gate_GNSS_Measurements(
+                    fix[in_gnss_ptr], pos_meas_SD, vel_meas_SD, P, cfg)
+                gnss_velocity_available = (valid_gnss and
+                    norm(adj_vel_meas_SD) <=
+                    LC_KF_config.gnss_vel_err_thresh)
 
-                    # Run GNSS Measurement Update for Kalman Filter
-                    if norm(pos_meas_SD) < cfg.gnss_pos_err_thresh: # skip points with large error
-                        est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias, P = LC_KF_GNSS_Update(
-                            r_gnss_e, v_gnss_e, pos_meas_SD, vel_meas_SD, est_C_b_e, C_e_n.T, est_v_eb_e,
-                            est_r_eb_e, est_IMU_bias, P, meas_omega_ib_b, LC_KF_config)
+                # Run GNSS Measurement Update for Kalman Filter
+                if valid_gnss:
+                    est_C_b_e, est_v_eb_e, est_r_eb_e, est_IMU_bias, P = LC_KF_GNSS_Update(
+                        r_gnss_e, v_gnss_e, adj_pos_meas_SD, adj_vel_meas_SD, est_C_b_e, C_e_n.T,
+                        est_v_eb_e, est_r_eb_e, est_IMU_bias, P, meas_omega_ib_b,
+                        LC_KF_config)
+                    # record last GNSS measurement, used for velocity matching
+                    prev_time_GNSS_coast = time_GNSS_coast
+                    prev_epoch_GNSS_coast = epoch_GNSS_coast
+                    time_GNSS_coast = time_GNSS
+                    epoch_GNSS_coast = epoch
+                    # update gravity
+                    gravity = Gravity_ECEF(est_r_eb_e)  # calculate ECEF gravity vector for this location
+                    g = norm(gravity)
 
-                        # record last GNSS measurement, used for velocity matching
-                        prev_time_GNSS_coast = time_GNSS_coast
-                        prev_epoch_GNSS_coast = epoch_GNSS_coast
-                        time_GNSS_coast = time_GNSS
-                        epoch_GNSS_coast = epoch
-                            
-                        # set flag for velocity matching if in coast mode
-                        if outp[epoch-1,10,p] == 1:
-                            vel_match_flag = True
-                    else:
-                        print('   %.2f sec: Outlier=%.2f ' % (time - t_gnss[0], norm(pos_meas_SD)))
+                    # set flag for velocity matching if in coast mode
+                    if outp[epoch-1,10,p] == 1:
+                        vel_match_flag = True
+                else:
+                    print('Outlier:   %.2f sec: pos_meas_SD=%.3f, pos_SD=%.3f fix_state0=%d' % (time_GNSS - t_gnss[0],
+                           norm(pos_meas_SD), norm(np.sqrt(np.diag(P[6:9, 6:9]))), fix[in_gnss_ptr]))
+
+            # A GNSS update can change the calibration estimates. Apply the
+            # corrected estimates over the remainder of this IMU interval.
+            meas_f_ib_b = raw_f_ib_b - est_IMU_bias[0:3]
+            meas_omega_ib_b = raw_omega_ib_b - est_IMU_bias[3:6]
+            if cfg.scale_factors:
+                meas_f_ib_b *= (1 - est_IMU_bias[6:9])
+                meas_omega_ib_b *= (1 - est_IMU_bias[9:12])
                     
             # Generate KF uncertainty and IMU bias output records
-            out_IMU_bias_est[epoch_GNSS, 0, p] = time
-            out_KF_SD[epoch_GNSS, 0, p] = time
+            out_IMU_bias_est[epoch_GNSS, 0, p] = time_GNSS
+            out_KF_SD[epoch_GNSS, 0, p] = time_GNSS
             out_IMU_bias_est[epoch_GNSS, 1:nbs + 1, p] = est_IMU_bias
             out_KF_SD[epoch_GNSS, 1:ns + 1, p] = np.sqrt(np.diag(P))
             
@@ -398,11 +487,28 @@ for p in range(npasses):
             else:
                 time_next_GNSS = time_GNSS + 1000 * run_dir;  # set to large value if at end
         
-        # End of GNSS measurement processing loop       
+        # End of GNSS measurement processing loop
+
+        # Propagate from the last GNSS update (or the previous IMU epoch) to
+        # the current IMU epoch.
+        tor_remaining = time - propagation_time
+        if abs(tor_remaining) > 1e-12:
+            if not cfg.disable_imu:  # disable IMU for eval only
+                est_r_eb_e, est_v_eb_e, est_C_b_e = Nav_equations_ECEF(
+                    tor_remaining, est_r_eb_e, est_v_eb_e, est_C_b_e,
+                    meas_f_ib_b, meas_omega_ib_b, gravity)
+            else:
+                est_r_eb_e += est_v_eb_e * tor_remaining
+            P = LC_KF_Predict(
+                tor_remaining, est_C_b_e, est_v_eb_e, est_r_eb_e,
+                est_IMU_bias, P, Qc, meas_f_ib_b, meas_omega_ib_b,
+                LC_KF_config, gravity, geocentric_radius)
         
         # Check accel/gyro and do zero velocity update if near zero
         if cfg.zupt_enable:
-            stationary = abs(norm(meas_f_ib_b) - g) < cfg.zupt_accel_thresh and norm(meas_omega_ib_b) < np.deg2rad(cfg.zupt_gyro_thresh)
+            stationary = abs(norm(meas_f_ib_b) - g) < cfg.zupt_accel_thresh and \
+                         norm(meas_omega_ib_b) < np.deg2rad(cfg.zupt_gyro_thresh) and \
+                         norm(est_v_eb_e) < cfg.zupt_vel_thresh
             stationary_count = stationary_count + 1 if stationary else 0
             if stationary_count == 1:
                 sum_gyro = meas_omega_ib_b  # reset filter sum
@@ -420,35 +526,46 @@ for p in range(npasses):
                 # with np.printoptions(precision=3, suppress=True):
                 #    print('   ZUPT update:%.1f: ' %  (time-t_gnss[0]), np.rad2deg(temp[:6]), '->', np.rad2deg(est_IMU_bias[:6]))
 
-        # Do non-holonomic update if driving straight and level
-        if cfg.nhc_enable and yaw_aligned:
+        # Apply NHC only when GNSS velocity is unavailable or not being used.
+        nhc_active = coast or not gnss_velocity_available
+        if cfg.nhc_enable and yaw_aligned and nhc_active:
             ok = (abs(meas_omega_ib_b[2]) < np.deg2rad(cfg.nhc_gyro_thesh)) and norm(est_v_eb_e) > cfg.nhc_min_vel
             nhc_count = nhc_count + 1 if ok else 0
             if nhc_count == cfg.nhc_epoch_count:
                 v = est_v_eb_e
-                est_C_b_e, est_v_eb_e, est_IMU_bias, P = LC_KF_NHC_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, -np.array(cfg.imu_offset),
-                                      est_IMU_bias, P, LC_KF_config, coast)
+                est_C_b_e, est_v_eb_e, est_IMU_bias, P = LC_KF_NHC_Update(est_C_b_e, est_v_eb_e, meas_omega_ib_b, r_imu_to_nhc_pivot_v,
+                                      est_IMU_bias, P, LC_KF_config)
                 #with np.printoptions(precision=3, suppress=True):
                 #    print('   NHC update %.2f: ' % (time-t_gnss[0]), est_C_b_e.T @ v, '->', est_C_b_e.T @ est_v_eb_e)
                 nhc_count = 0
+        else:
+            nhc_count = 0
         
         # Check if est_C_b_e is ortho-normal and if not, ortho-normalize it
         est_C_b_e = ortho_C(est_C_b_e)
         
-        # Calculate position, velocity at GNSS antenna and system origin for output profile
-        est_v_gnss_e, est_r_gnss_e = Lever_Arm(est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b, LC_KF_Config.r_lever_arm_b)
-        est_v_ref_e, est_r_ref_e = Lever_Arm(est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b, -np.array(cfg.imu_offset))
-        
-        # Calculate velocity in body frame at system origin for output profile
-        v_b = est_C_b_e.T @ est_v_ref_e  
+        # Velocity at the NHC pivot, resolved in vehicle/NHC FRD. Including the
+        # rotational lever-arm velocity makes R and D zero for ideal no-slip
+        # motion on level ground or a hill.
+        est_v_nhc_pivot_e, _ = Lever_Arm(
+            est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b,
+            r_imu_to_nhc_pivot_b)
+        v_nhc = (LC_KF_config.C_b_to_nhc @ est_C_b_e.T @
+                 est_v_nhc_pivot_e)
         
         # Generate output profile record
         est_C_b_n = C_e_n @ est_C_b_e
         outp[epoch, 0, p] = time
         if cfg.out_frame == 'gnss':
+            est_v_gnss_e, est_r_gnss_e = Lever_Arm(
+                est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b,
+                LC_KF_Config.r_lever_arm_b)
             outp[epoch, 1:4, p] = est_r_gnss_e # ECEF
             outp[epoch, 4:7, p] = est_v_gnss_e # ECEF
         elif cfg.out_frame == 'origin':
+            est_v_ref_e, est_r_ref_e = Lever_Arm(
+                est_C_b_e, est_v_eb_e, est_r_eb_e, meas_omega_ib_b,
+                -np.array(cfg.imu_offset))
             outp[epoch, 1:4, p] = est_r_ref_e # ECEF
             outp[epoch, 4:7, p] = est_v_ref_e # ECEF
         else:    # 'imu'
@@ -458,7 +575,7 @@ for p in range(npasses):
         outp[epoch, 11:14, p] = np.sqrt(np.diag(C_e_n @ P[6:9,6:9] @ C_e_n.T)) # NED pos stdev
         outp[epoch, 14:17, p] = np.sqrt(np.diag(C_e_n @ P[3:6,3:6] @ C_e_n.T)) # NED vel stdev
         outp[epoch, 17:20, p] = np.sqrt(np.diag(C_e_n @ P[0:3,0:3] @ C_e_n.T)) # RPY stdev (rad)
-        outp[epoch,20:23, p] = v_b
+        outp[epoch,20:23, p] = v_nhc
         
         # check for real GNSS outage longer than threshold and flag as coast
         if coast == 0 and (time - time_GNSS_coast) * run_dir > cfg.vel_match_min_t:

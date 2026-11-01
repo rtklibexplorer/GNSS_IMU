@@ -1,116 +1,170 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+r"""
 ===============================================================================
  Project:    Sensor Fusion for GNSS/IMU (Loosely Coupled Kalman Filter)
- File:       convert_ubx_file.py
+ File:       convert_KF_GINS_files.py
  Author:     Tim Everett
  Copyright:  (c) 2025 Tim Everett
  License:    BSD 3 License (see LICENSE file for details)
 
- Description:  Script to convert data files from the KF-GINS dataset 2 which is 
-available at https://github.com/i2Nav-WHU/KF-GINS-Matlab/tree/main/dataset2 
-into an RTKLIB GNSS solution file and an IMU CSV file for input into the sensor
- fusion solution.
+ Description:
+    Convert all four Awesome-GINS sensors to GNSS_IMU input files.
 
-Instructions for use:
+    The source IMU fields are angle and velocity *increments*. Dividing each
+    increment by its measured sample interval produces the interval-average gyro
+    rate and specific force required by GNSS_IMU; it does not interpolate an
+    instantaneous value. The GNSS source contains positions only, so GNSS velocity
+    is estimated from successive positions as an interval-average velocity. Its
+    uncertainty remains large enough to select a position-only Kalman update.
 
-To generate the solution:
-1) Run get_KF_GINS_data.py to get the data from the repo
-2) Run this script 
-3) Comment/uncomment lines in the GNSS_IMU.py header to select these files 
-4) Run GNSS_IMU.py
+    From the repository root, run::
 
-To compare to KF-GINS results
-1) Run KF-GINS-Matlab in Matlab or Octave on dataset2
-2) Copy the NavResult_GNSSVEL.nav results file into the data/KF_GINS folder
-3) Run KF_GINS_compare.py
+        python src\convert_KF_GINS_files.py
+
+    Edit the parameter block at the top of this file to select the source,
+    destination, sensors, or GPS week. The source archives must be extracted
+    before running the converter.
 ===============================================================================
 """
-import pylab as plt
-from imu_transforms import utc_secs_to_datetime
-from datetime import datetime
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import numpy as np
-from numpy.linalg import norm
-from os.path import join
 
-####### Select input file and configuration parameters  #######################################
+from imu_transforms import LLH_to_ECEF, compute_C_e_n
 
-dataDir = r'..\data\KF_GINS'
-gnss_infile = 'GNSS-POSVEL.txt'
-imu_infile = 'ADIS16465.txt'
-out_name = 'ADIS16465'
-date = '5/28/2025'  # arbitrary date since GNSS file only contains TOW
-g = 9.79363  # gravity (m/sec^2)
 
-# Read and parse GNSS data file
-data = np.genfromtxt(join(dataDir, gnss_infile))
-n = len(data)
-ts = data[:,0]
-llh = data[:,1:4]
-posstd = data[:,4:7]
-vel = data[:,7:10]
-velstd = data[:,10:13]
+####### Input/output and conversion parameters ################################
 
-# No fix status in data, so use horiz posstd to guess fix status
-fix = np.ones(len(vel))  # 1=FIX
-ix = np.where(norm(posstd[:,:2], axis=1)>.05) # find float
-fix[ix] = 2 # 2= FLOAT
-ix = np.where(norm(posstd[:,:2], axis=1)>.25) # find single
-fix[ix] = 5 # 5 =SINGLE
+# Awesome-GINS source folder populated by get_Awesome_GINS_data.py.
+repoDir = Path(__file__).resolve().parent.parent
+dataDir = repoDir / "data" / "awesome_gins"
 
-# Put GNSS data into output array
-outg = np.zeros((n,23), dtype=object)
-ts0 = datetime.strptime(date, "%m/%d/%Y").timestamp()
-for i in range(n):
-    outg[i,0] = utc_secs_to_datetime(ts0 + ts[i])
-outg[:,1:4] = llh
-outg[:,4] = fix   # fix status
-outg[:,5] = 22  # num sats
-outg[:,6:9] = posstd
-outg[:,9:14] = 0
-outg[:,14:17] = vel * [1,1,-1]   # NED -> NEU
-outg[:,17:20] = velstd
-outg[:,20:23] = 0
+# A separate folder lets run_benchmark.py detect conversion with one check.
+outDir = dataDir / "converted"
 
-# Save GNSS data in RTKLIB format
-hdrg = '%  GPST            latitude(deg) longitude(deg) height(m) Q         ns        sdn(m)    sde(m)    sdu(m)    sdne(m)   sdeu(m)   sdun(m)  age(s)     ratio     vn(m/s)   ve(m/s)    vu(m/s)    sdvn      sdve     sdvu       sdvne    sdveu      sdvun'
-fmtg = ['%s'] + ['%.7f'] * 22
-gnssFileOut = join(dataDir, 'gnss_' + out_name + '_sf.pos')
-np.savetxt(gnssFileOut, outg, header=hdrg, encoding='utf-8', fmt=fmtg, comments='')
+# Shared extracted GNSS input file, relative to dataDir.
+gnss_infile = Path("GNSS RTK") / "GNSS_RTK.pos"
 
-# Read IMU data file
-data = np.genfromtxt(join(dataDir, imu_infile))
-n = len(data) - 1
-secs = data[:,0]  # seconds 
-gyro =  data[:,1:4]  # incremental gyro measurementsin rad
-acc = data[:,4:7] / g # incremental acc measurements in m/sec
+# Sensors to convert. Remove entries to convert only a subset.
+imus = ("ICM20602", "ADIS16460", "ADIS16465", "i300")
 
-# Convert incremental data to absolute
-dsecs =np.tile(np.diff(secs), (3,1)).T
-acc_filt = acc[1:] / dsecs
-gyro_filt = gyro[1:] / dsecs
-secs = secs[1:]
+# The Awesome-GINS recording date corresponds to GPS week 2171.
+gps_week = 2171
 
-# Put IMU data into output array
-ts0 = datetime.strptime(date, "%m/%d/%Y").timestamp() 
-outi = np.zeros((n,11))
-outi[:,0] = ts0 + secs
-outi[:,1:4] = acc_filt
-outi[:,4:7] = gyro_filt 
-outi[:,7:10] = 0
-outi[:,10] = 0
+# Standard gravity converts average specific force from m/s^2 to g.
+standard_gravity = 9.80665
 
-# Save IMU data to file
-hdr = '% UNIX time(s),    accX(g),  accY(g),  accZ(g),  gyroX(r/s),gyroY(r/s),gyroZ(r/s),magX(uT),magY(uT),magZ(uT), unused'
-imuFileOut = join(dataDir, 'imu_' + out_name + '_sf.csv')
-np.savetxt(imuFileOut, outi, encoding='utf-8', fmt='%.7f', delimiter=',', header=hdr, comments='')
-    
-# # Plot data (optinal)
-# plt.figure()
-# plt.title('Velocity')
-# plt.plot(ts,outg[:,14:17] * [1,1,-1], '.-')  # NEU -> NED
-# plt.grid()
-# plt.legend(['N', 'E', 'D'])
-# plt.show()
+# The first GNSS row initializes velocity covariance but is not used as a
+# measurement update. The vehicle is stationary at the start of this dataset.
+initial_velocity_SD = 1.0       # m/s, initial velocity uncertainty per axis
 
+# Subsequent position-derived velocities retain large uncertainty. This SD
+# exceeds the configured threshold, selecting a position-only Kalman update.
+unused_velocity_SD = 1000.0     # m/s, velocity uncertainty per axis
+
+###############################################################################
+
+GPS_EPOCH = datetime(1980, 1, 6, tzinfo=timezone.utc)
+
+
+def _gps_week_tow_to_unix_like(week: int, tow: np.ndarray) -> np.ndarray:
+    """Map GPST week/TOW to GNSS_IMU's calendar-based numeric time scale."""
+    return (GPS_EPOCH + timedelta(weeks=week)).timestamp() + tow
+
+
+def _format_gpst(seconds: float) -> str:
+    dt = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return dt.strftime("%Y/%m/%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
+
+def _position_velocity_neu(tow: np.ndarray, llh_deg: np.ndarray) -> np.ndarray:
+    """Calculate interval-average NEU velocity from successive positions."""
+    llh_rad = llh_deg.copy()
+    llh_rad[:, :2] = np.deg2rad(llh_rad[:, :2])
+    ecef = LLH_to_ECEF(llh_rad)
+    velocity_ecef = np.diff(ecef, axis=0) / np.diff(tow)[:, None]
+
+    velocity_neu = np.empty_like(llh_deg)
+    for index, velocity in enumerate(velocity_ecef, start=1):
+        # Resolve each interval-average velocity at the interval midpoint.
+        latitude = 0.5 * (llh_rad[index - 1, 0] + llh_rad[index, 0])
+        longitude = 0.5 * (llh_rad[index - 1, 1] + llh_rad[index, 1])
+        velocity_ned = compute_C_e_n(latitude, longitude) @ velocity
+        velocity_neu[index] = velocity_ned * np.array([1.0, 1.0, -1.0])
+
+    # The first epoch has no preceding position; use the first interval mean.
+    velocity_neu[0] = velocity_neu[1]
+    return velocity_neu
+
+
+def convert_gnss(source: Path, destination: Path, gps_week: int) -> None:
+    data = np.loadtxt(source)
+    if data.ndim != 2 or data.shape[1] != 7 or len(data) < 2:
+        raise ValueError(f"Expected at least two 7-column GNSS rows in {source}")
+    tow, llh, position_sd = data[:, 0], data[:, 1:4], data[:, 4:7]
+    if np.any(np.diff(tow) <= 0):
+        raise ValueError(f"GNSS times are not strictly increasing in {source}")
+
+    seconds = _gps_week_tow_to_unix_like(gps_week, tow)
+
+    output = np.zeros((len(data), 23), dtype=object)
+    output[:, 0] = [_format_gpst(value) for value in seconds]
+    output[:, 1:4] = llh
+    output[:, 4] = 1          # supplied solutions are RTK fixed
+    output[:, 5] = 0          # satellite count is not supplied
+    output[:, 6:9] = position_sd
+    output[:, 14:17] = _position_velocity_neu(tow, llh)  # m/s NEU
+    output[:, 17:20] = unused_velocity_SD
+    output[0, 17:20] = initial_velocity_SD
+
+    header = (
+        "%  GPST            latitude(deg) longitude(deg) height(m) Q ns "
+        "sdn(m) sde(m) sdu(m) sdne(m) sdeu(m) sdun(m) age(s) ratio "
+        "vn(m/s) ve(m/s) vu(m/s) sdvn sdve sdvu sdvne sdveu sdvun"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(destination, output, header=header, comments="",
+               fmt=["%s"] + ["%.9f"] * 22)
+
+
+def convert_imu(source: Path, destination: Path, gps_week: int) -> None:
+    data = np.loadtxt(source)
+    if data.ndim != 2 or data.shape[1] != 7 or len(data) < 2:
+        raise ValueError(f"Expected at least two 7-column IMU rows in {source}")
+    dt = np.diff(data[:, 0])
+    if np.any(dt <= 0):
+        raise ValueError(f"IMU times are not strictly increasing in {source}")
+
+    # Every output row is the mean over the interval ending at that timestamp.
+    # The first source row has no preceding timestamp, so it is omitted.
+    output = np.zeros((len(data) - 1, 10))
+    output[:, 0] = _gps_week_tow_to_unix_like(gps_week, data[1:, 0])
+    output[:, 1:4] = data[1:, 4:7] / dt[:, None] / standard_gravity
+    output[:, 4:7] = data[1:, 1:4] / dt[:, None]
+
+    header = (
+        "% UNIX time(s),accX(g),accY(g),accZ(g),gyroX(rad/s),gyroY(rad/s),"
+        "gyroZ(rad/s),magX(uT),magY(uT),magZ(uT)"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(destination, output, delimiter=",", header=header, comments="",
+               fmt=["%.6f"] + ["%.10f"] * 9)
+
+
+def main() -> None:
+    gnss_source = dataDir / gnss_infile
+    for imu in imus:
+        imu_source = dataDir / imu / f"{imu}.txt"
+        stem = f"{imu}_sf"
+        convert_gnss(gnss_source, outDir / f"gnss_{stem}.pos", gps_week)
+        convert_imu(imu_source, outDir / f"imu_{stem}.csv", gps_week)
+        print(f"Converted {imu}: {outDir}")
+
+
+if __name__ == "__main__":
+    main()
