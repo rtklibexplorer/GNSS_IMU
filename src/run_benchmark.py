@@ -1012,36 +1012,43 @@ def main() -> None:
     if MAX_SIMULTANEOUS_RUNS < 1:
         raise ValueError("MAX_SIMULTANEOUS_RUNS must be at least 1")
     worker_count = min(MAX_SIMULTANEOUS_RUNS, len(enabled))
-    if RUN_OUTAGE_BENCHMARK and worker_count:
-        print(f"Running {len(enabled)} IMUs with {worker_count} workers",
-              flush=True)
-        with ProcessPoolExecutor(max_workers=worker_count) as pool:
-            futures = {pool.submit(run_imu, name, info): name
-                       for name, info in enabled}
-            for future in as_completed(futures):
-                imu_name = futures[future]
-                try:
-                    future.result()
-                except Exception as error:
-                    raise RuntimeError(f"{imu_name} benchmark failed") from error
-                print(f"{imu_name}: complete", flush=True)
+    if RUN_OUTAGE_BENCHMARK:
+        if worker_count:
+            print(f"Running {len(enabled)} IMUs with {worker_count} workers",
+                  flush=True)
+            with ProcessPoolExecutor(max_workers=worker_count) as pool:
+                futures = {pool.submit(run_imu, name, info): name
+                           for name, info in enabled}
+                for future in as_completed(futures):
+                    imu_name = futures[future]
+                    try:
+                        future.result()
+                    except Exception as error:
+                        raise RuntimeError(
+                            f"{imu_name} benchmark failed") from error
+                    print(f"{imu_name}: complete", flush=True)
         make_plot()
 
-    if RUN_CONTINUOUS_TRUTH_BENCHMARK and worker_count:
+    if RUN_CONTINUOUS_TRUTH_BENCHMARK:
         CONTINUOUS_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"Running continuous truth benchmark for {len(enabled)} IMUs "
-              f"with {worker_count} workers", flush=True)
-        with ProcessPoolExecutor(max_workers=worker_count) as pool:
-            futures = {pool.submit(run_continuous_imu, name, info): name
-                       for name, info in enabled}
-            for future in as_completed(futures):
-                imu_name = futures[future]
-                try:
-                    future.result()
-                except Exception as error:
-                    raise RuntimeError(
-                        f"{imu_name} continuous benchmark failed") from error
-                print(f"{imu_name}: continuous complete", flush=True)
+        if worker_count:
+            print(
+                f"Running continuous truth benchmark for {len(enabled)} IMUs "
+                f"with {worker_count} workers", flush=True)
+            with ProcessPoolExecutor(max_workers=worker_count) as pool:
+                futures = {
+                    pool.submit(run_continuous_imu, name, info): name
+                    for name, info in enabled
+                }
+                for future in as_completed(futures):
+                    imu_name = futures[future]
+                    try:
+                        future.result()
+                    except Exception as error:
+                        raise RuntimeError(
+                            f"{imu_name} continuous benchmark failed") \
+                            from error
+                    print(f"{imu_name}: continuous complete", flush=True)
         make_continuous_report()
         make_continuous_plot()
 
